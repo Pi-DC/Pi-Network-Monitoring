@@ -80,6 +80,10 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
 - /reports: Dashboard PDF gets per-port (traffic, errors, speed, time up) and per-item charts; Data report PDF/CSV;
   fix for an endless chart-axis loop on flat negative series (HTTP 500).
 - Daily 08:00 PDF e-mail for every dashboard (`sync_daily_reports.py`); PDF links removed.
+- Overview port maps sized so every port shows its name, not only its colour (Zabbix drops a honeycomb label when
+  the cell gets too small): big switches (spines, 100+ ports) get a full-width map, the others stay in pairs
+  (`build_switch_dashboard.overview_map_size`). Pi VMware Fabric Overview now has room for only 2 click-to-graph
+  panels; the per-switch pages keep theirs.
 
 ### Alerting and thresholds
 - Default thresholds on every device: CPU 75 %, memory 85 % (`set_default_thresholds.py`, hourly);

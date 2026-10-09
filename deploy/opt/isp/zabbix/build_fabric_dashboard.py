@@ -195,15 +195,34 @@ def build(z, NAME):
     # ---------- Overview ----------
     table_h = 2 + (len(hosts) + 1) // 2   # rows are compact: about two switches per grid row
     ov = [health_table("Fabric health (one row per switch)", 0, 0, 72, table_h, gid)]
-    y = table_h
-    for n, h in enumerate(hosts):
-        mh = 7 if ports[h["hostid"]] > 80 else 6
-        if n % 2 == 0 and n:
-            y += row_h
-        row_h = mh if n % 2 == 0 else max(row_h, mh)
-        ov.append(sw.honeycomb(f"{short(h)} – {h['name']} ({sw.MAP_LEGEND})", (n % 2) * 36, y, 36, mh,
+    # port maps sized so the port names stay readable (sw.overview_map_size): switches with many ports get a
+    # full-width row, the others are paired side by side (the pair shares the taller of the two heights)
+    y, half = table_h, []
+
+    def place(h, x, y, mw, mh):
+        ov.append(sw.honeycomb(f"{short(h)} – {h['name']} ({sw.MAP_LEGEND})", x, y, mw, mh,
                                h["hostid"], sw.IF_STATE_ITEMS, sw.IF_STATUS_TH))
-    y += row_h
+
+    def flush(y):
+        if half:
+            row_h = max(mh for _, mh in half)
+            for n, (h, _) in enumerate(half):
+                place(h, n * 36, y, 36, row_h)
+            half.clear()
+            y += row_h
+        return y
+
+    for h in hosts:
+        mw, mh = sw.overview_map_size(ports[h["hostid"]])
+        if mw == 72:
+            y = flush(y)
+            place(h, 0, y, 72, mh)
+            y += mh
+        else:
+            half.append((h, mh))
+            if len(half) == 2:
+                y = flush(y)
+    y = flush(y)
     ov.append(sw.problems(f"{NAME} problems (current and recent)", 0, y, 72, 4, groupid=gid))
     pages = [{"name": "Overview", "widgets": ov}]
 

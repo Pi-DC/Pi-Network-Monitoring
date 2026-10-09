@@ -8,6 +8,8 @@
 
 Re-runnable: each dashboard is rebuilt in place. Run after add_switches.py.
 """
+import math
+
 import build_dashboard as d
 import click_to_graph
 import setup_isp_links as base
@@ -91,6 +93,42 @@ def honeycomb(name, x, y, w, h, hostid, item_pattern, th, ref=None):
     if ref:
         fields.append(f(STR, "reference", ref))
     return d.widget("honeycomb", name, x, y, w, h, fields + d.thresholds(*th))
+
+
+LABEL_PX = 65   # wanted room for a port name per honeycomb cell, in px at the 1920 px PDF / screen width
+
+
+def label_room(cells, w, h, screen=1920):
+    """Room (px) a honeycomb of `cells` cells on a w x h grid widget leaves for each cell's label. Mirrors Zabbix
+    7.0 CSVGHoneycomb: the label is dropped (map shows colours only) below 49 px (LABEL_WIDTH_MIN * .875)."""
+    wpx, hpx = w * (screen - 20) / 72 - 20, h * 70 - 40          # widget body: grid cell 70 px high, header + padding
+    cw, ch = 1000, 1000 / math.sqrt(3) * 2
+    gap, min_h = cw / 12, 50 / math.sqrt(3) * 2                  # CELL_WIDTH_MIN = 50
+    max_rows = max(0, math.floor((hpx - min_h) / (min_h * .75)) + 1)
+    max_cols = max(0, math.floor((wpx - (25 if max_rows > 1 else 0)) / 50))
+    cnt = min(1000, cells, max_rows * max_cols)
+    if not cnt:
+        return 0
+
+    def scale(rows):
+        cols = max(1, min(max_cols, cnt // rows))
+        rows = math.ceil(cnt / cols)
+        width = cw * cols + (cw / 2 if rows > 1 and cols * 2 <= cnt else 0)
+        return min(wpx / (width - gap * .5), hpx / (ch * .25 * (3 * rows + 1) - gap))
+    rows = max(1, min(max_rows, cnt, math.sqrt(hpx * cnt / wpx)))
+    s = max(scale(math.floor(rows)), scale(math.ceil(rows)))
+    return (cw - gap) * s - 8                                    # cell_padding 4 px each side
+
+
+def map_rows(cells, w, lo=5, hi=12):
+    """Smallest honeycomb height (lo..hi rows) at width `w` that keeps the port names readable (hi if none does)."""
+    return next((h for h in range(lo, hi + 1) if label_room(cells, w, h) >= LABEL_PX), hi)
+
+
+def overview_map_size(cells, lo=6):
+    """(width, height) of an Overview port map: half width if that stays readable within 9 rows, else full width."""
+    h = map_rows(cells, 36, lo)
+    return (36, h) if label_room(cells, 36, h) >= LABEL_PX and h <= 9 else (72, map_rows(cells, 72, lo))
 
 
 def tile(name, itemid, x, y, desc, w=12, h=3, decimals=1, th=(), value_size=26):
@@ -188,7 +226,7 @@ def build(z, cfg):
             ov.append(fb.health_table("All WAN switches health (one row per switch)", 0, y, 72, table_h, gid))
             y += table_h
             for h in others:
-                mh = 7 if fb.port_count(z, h) > 80 else 6
+                mh = map_rows(fb.port_count(z, h), 72, 6)   # tall enough for readable port names
                 ov.append(honeycomb(f"{h['name']} interfaces ({MAP_LEGEND})", 0, y, 72, mh, h["hostid"],
                                     IF_STATE_ITEMS, IF_STATUS_TH))
                 y += mh
@@ -197,10 +235,23 @@ def build(z, cfg):
         spines = [vis[h] for h, _, r in switches if r == "spine"]
         leaves = [vis[h] for h, _, r in switches if r == "leaf"]
         ov.append(health_table("Fabric health (one row per switch)", 0, 0, 72, 4, gid))
-        for n, (host, short, role) in enumerate(switches):
-            ov.append(honeycomb(f"{short} ({role}) interfaces ({MAP_LEGEND})", (n % 2) * 36, 4 + (n // 2) * 11,
-                                36, 11, hosts[host]["hostid"], IF_STATE_ITEMS, IF_STATUS_TH))
-        ov.append(svg("Spine <-> leaf fabric links", 0, 26, 36, 6, [], [
+        # port maps sized so the port names stay readable: full width for the big spines, else paired
+        y, half = 4, []
+        for host, short, role in switches + [(None, None, None)]:
+            size = overview_map_size(fb.port_count(z, hosts[host])) if host else (72, 0)
+            if half and (size[0] == 72 or len(half) == 2):
+                row_h = max(mh for *_, mh in half)
+                for n, (hs, sh, rl, _) in enumerate(half):
+                    ov.append(honeycomb(f"{sh} ({rl}) interfaces ({MAP_LEGEND})", n * 36, y, 36, row_h,
+                                        hosts[hs]["hostid"], IF_STATE_ITEMS, IF_STATUS_TH))
+                half, y = [], y + row_h
+            if host and size[0] == 72:
+                ov.append(honeycomb(f"{short} ({role}) interfaces ({MAP_LEGEND})", 0, y, 72, size[1],
+                                    hosts[host]["hostid"], IF_STATE_ITEMS, IF_STATUS_TH))
+                y += size[1]
+            elif host:
+                half.append((host, short, role, size[1]))
+        ov.append(svg("Spine <-> leaf fabric links", 0, y, 36, 6, [], [
             {"hosts": spines, "items": ["Interface Port-Channel201(*): Bits sent"], "color": "2E9E5B",
              "label": "Spines -> leaves", "fill": 2},
             {"hosts": spines, "items": ["Interface Port-Channel201(*): Bits received"], "color": "2563EB",
@@ -209,16 +260,16 @@ def build(z, cfg):
              "label": "Leaf uplinks in", "width": 1},
             {"hosts": leaves, "items": ["Interface Port-Channel101(*): Bits sent"], "color": "E5484D",
              "label": "Leaf uplinks out", "width": 1}], legend_lines=8))
-        ov.append(svg("Spines to VMware 100G spine and Forti-120G LAN", 36, 26, 36, 6, spines, [
+        ov.append(svg("Spines to VMware 100G spine and Forti-120G LAN", 36, y, 36, 6, spines, [
             {"items": ["Interface Port-Channel203(*): Bits sent"], "color": "2563EB", "label": "To VMware", "fill": 2},
             {"items": ["Interface Port-Channel203(*): Bits received"], "color": "0EA5E9", "label": "From VMware"},
             {"items": ["Interface Port-Channel133(*): Bits sent"], "color": "F59E0B", "label": "To Forti LAN"},
             {"items": ["Interface Port-Channel133(*): Bits received"], "color": "E5484D", "label": "From Forti LAN"}],
             legend_lines=8))
-        ov.append(svg("Peer links (MLAG)", 0, 32, 36, 5, [], [
+        ov.append(svg("Peer links (MLAG)", 0, y + 6, 36, 5, [], [
             {"hosts": spines, "items": ["Interface Port-Channel100(*): Bits sent"], "color": "7C3AED", "label": "Spine peer"},
             {"hosts": leaves, "items": ["Interface Port-Channel41(*): Bits sent"], "color": "0D9488", "label": "Leaf peer"}]))
-        ov.append(problems(f"{cfg['name']} problems (current and recent)", 36, 32, 36, 5, groupid=gid))
+        ov.append(problems(f"{cfg['name']} problems (current and recent)", 36, y + 6, 36, 5, groupid=gid))
     pages = [{"name": "Overview", "widgets": ov}]
 
     # ---------- One page per switch ----------
