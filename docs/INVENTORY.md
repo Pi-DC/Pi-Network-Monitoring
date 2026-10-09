@@ -2,14 +2,15 @@
 
 Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by hand.
 
-## Monitored devices (30 enabled, 30 total)
+## Monitored devices (31 enabled, 31 total)
 
 | Group | Host | Name | IP | Model / vendor | Template | Status |
 |---|---|---|---|---|---|---|
 | ISP Links | A10-LLB | A10 LLB (PI-AMR-A10_LLB) | 172.20.96.83 |  | Generic by SNMP | enabled |
-| Pi 1G Colo Fabric | 1G-COLO-SW1 | 1G-COLO-SW1 (Huawei-1G-Colo-SW1) | 10.128.16.27 | Huawei S5720-28P-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
-| Pi 1G Colo Fabric | 1G-COLO-SW2 | 1G-COLO-SW2 (Huawei-1G-Colo-SW2) | 172.16.132.4 | Huawei S5720-28P-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
-| Pi 1G Colo Fabric | 1G-COLO-SW3 | 1G-COLO-SW3 (Huawei-1G-Colo-SW3) | 172.16.131.33 | Huawei S5720-28X-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
+| Pi 1G Colo Fabric | 1G-COLO-DH4-SW1 | 1G-COLO-DH4-SW1 (DH4-AD39-Colo-SW1) | 10.128.79.50 | Catalyst 3650-24TS | Cisco Catalyst by SNMP - PIDC | enabled |
+| Pi 1G Colo Fabric | 1G-COLO-DH5-SW1 | 1G-COLO-DH5-SW1 (Huawei-1G-Colo-SW1) | 10.128.16.27 | Huawei S5720-28P-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
+| Pi 1G Colo Fabric | 1G-COLO-DH5-SW2 | 1G-COLO-DH5-SW2 (Huawei-1G-Colo-SW2) | 172.16.132.4 | Huawei S5720-28P-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
+| Pi 1G Colo Fabric | 1G-COLO-DH5-SW3 | 1G-COLO-DH5-SW3 (Huawei-1G-Colo-SW3) | 172.16.131.33 | Huawei S5720-28X-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
 | Pi DH5 Cross Connect Fabric | DH5_SW1 | DH5_SW1 (DH5-SW1-100Mb) | 10.128.4.222 | Catalyst 2960 | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi DH5 Cross Connect Fabric | DH5_SW2 | DH5_SW2 (DH5-SW2-1G) | 10.128.4.218 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi DH5 Cross Connect Fabric | DH5_SW3 | DH5_SW3 (DH5-SW3-1G) | 10.128.4.217 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
@@ -52,7 +53,7 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | 414 | Pi VMware Fabric | 9 | yes |
 | 415 | Pi MMR Cross Connect Fabric | 6 | yes |
 | 416 | Pi DH5 Cross Connect Fabric | 5 | yes |
-| 418 | Pi 1G Colo Fabric | 4 | yes |
+| 418 | Pi 1G Colo Fabric | 5 | yes |
 
 ## E-mail alerting
 

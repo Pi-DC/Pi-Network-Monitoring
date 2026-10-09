@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Add the cross-connect switches (Cisco Catalyst 4500 / 2960 / 2960S / 2960X) to Zabbix, one host group per fabric:
 "Pi MMR Cross Connect Fabric" (MMR-1), "Pi DH5 Cross Connect Fabric" (data hall 5) - Cisco Catalyst - and
-"Pi 1G Colo Fabric" (Huawei S5720, template "Huawei VRP by SNMP - PIDC", see add_vmware_fabric.setup_huawei).
+"Pi 1G Colo Fabric" (Huawei S5720, template "Huawei VRP by SNMP - PIDC", see add_vmware_fabric.setup_huawei; plus
+the Cisco Catalyst 3650 1G-COLO-DH4-SW1, which overrides template and vendor per switch).
 
 All use "Cisco Catalyst by SNMP - PIDC" (stock "Cisco IOS by SNMP" copy with 10s traffic walk, Admin status + Port
 state, and the vendor-neutral "Health: ..." items; see add_vmware_fabric.py). VLAN SVIs, internal "VLAN-..." and
@@ -16,7 +17,7 @@ import add_switches
 import add_vmware_fabric as fab
 import setup_isp_links as base
 
-FABRICS = {  # host group: ("fabric" tag, [(host, visible name, IP, model)], template, vendor tag)
+FABRICS = {  # host group: ("fabric" tag, [(host, visible name, IP, model[, template, vendor tag])], template, vendor tag)
     "Pi MMR Cross Connect Fabric": ("mmr", [
         ("MMR1_SW1", "MMR1_SW1 (PIDC-MMR-1-Ext-SW1)", "10.128.4.221", "Catalyst 2960"),
         ("MMR1_SW2", "MMR1_SW2 (MMR1-Ext-SW2)", "10.128.4.220", "Catalyst 2960S"),
@@ -31,9 +32,11 @@ FABRICS = {  # host group: ("fabric" tag, [(host, visible name, IP, model)], tem
         ("DH5_SW4", "DH5_SW4 (DH5-Ext-SW4)", "172.18.127.207", "Catalyst 4500"),
     ], fab.CATALYST, "cisco"),
     "Pi 1G Colo Fabric": ("1g-colo", [
-        ("1G-COLO-SW1", "1G-COLO-SW1 (Huawei-1G-Colo-SW1)", "10.128.16.27", "Huawei S5720-28P-PWR-LI-AC"),
-        ("1G-COLO-SW2", "1G-COLO-SW2 (Huawei-1G-Colo-SW2)", "172.16.132.4", "Huawei S5720-28P-PWR-LI-AC"),
-        ("1G-COLO-SW3", "1G-COLO-SW3 (Huawei-1G-Colo-SW3)", "172.16.131.33", "Huawei S5720-28X-PWR-LI-AC"),
+        ("1G-COLO-DH5-SW1", "1G-COLO-DH5-SW1 (Huawei-1G-Colo-SW1)", "10.128.16.27", "Huawei S5720-28P-PWR-LI-AC"),
+        ("1G-COLO-DH5-SW2", "1G-COLO-DH5-SW2 (Huawei-1G-Colo-SW2)", "172.16.132.4", "Huawei S5720-28P-PWR-LI-AC"),
+        ("1G-COLO-DH5-SW3", "1G-COLO-DH5-SW3 (Huawei-1G-Colo-SW3)", "172.16.131.33", "Huawei S5720-28X-PWR-LI-AC"),
+        ("1G-COLO-DH4-SW1", "1G-COLO-DH4-SW1 (DH4-AD39-Colo-SW1)", "10.128.79.50", "Catalyst 3650-24TS",
+         fab.CATALYST, "cisco"),   # IOS-XE 16.12.7, 2x PWR-C2-250WAC
     ], fab.HUAWEI, "huawei"),
 }
 
@@ -42,7 +45,7 @@ def add_fabric(z, group, fabric, switches, tid, vendor, community):
     found = z.call("hostgroup.get", {"filter": {"name": [group]}, "output": ["groupid"]})
     gid = found[0]["groupid"] if found else z.call("hostgroup.create", {"name": group})["groupids"][0]
     created = []
-    for host, name, ip, model in switches:
+    for host, name, ip, model, *override in switches:   # override = (template name, vendor tag)
         existing = z.call("host.get", {"filter": {"host": [host]}, "output": ["hostid"],
                                        "selectInterfaces": ["interfaceid", "ip"]})
         if existing:
@@ -52,13 +55,14 @@ def add_fabric(z, group, fabric, switches, tid, vendor, community):
             add_switches.ensure_macros(z, existing[0]["hostid"])
             continue
         z.call("host.create", {
-            "host": host, "name": name, "groups": [{"groupid": gid}], "templates": [{"templateid": tid}],
+            "host": host, "name": name, "groups": [{"groupid": gid}],
+            "templates": [{"templateid": fab.template_id(z, override[0]) if override else tid}],
             "interfaces": [{"type": 2, "main": 1, "useip": 1, "ip": ip, "dns": "", "port": "161",
                             "details": {"version": 2, "bulk": 1, "community": "{$SNMP_COMMUNITY}"}}],
             "macros": [{"macro": "{$SNMP_COMMUNITY}", "value": community, "type": 1,
                         "description": "Cross-connect SNMP v2c community"},
                        {"macro": "{$NET.IF.IFNAME.NOT_MATCHES}", "value": fab.IFNAME_NOT_MATCHES}] + add_switches.EXTRA_MACROS,
-            "tags": [{"tag": "role", "value": "cross-connect"}, {"tag": "vendor", "value": vendor},
+            "tags": [{"tag": "role", "value": "cross-connect"}, {"tag": "vendor", "value": override[1] if override else vendor},
                      {"tag": "fabric", "value": fabric}, {"tag": "model", "value": model}],
             "inventory_mode": 1,
         })

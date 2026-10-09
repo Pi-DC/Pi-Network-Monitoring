@@ -29,6 +29,10 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
   "Uptime (hardware)" are now calculated: raw value + 497.1 days x wraps, wraps derived from snmpEngineTime (raw
   values kept as "SNMP raw: ..." items). `fix_uptime_wrap.py`, hourly cron `/etc/cron.d/zabbix-uptime-wrap`, covers
   every SNMP template linked to a host (incl. stock "Generic by SNMP" used by the A10).
+- **Pi 1G Colo Fabric**: added 1G-COLO-DH4-SW1 10.128.79.50 (DH4-AD39-Colo-SW1, Cisco Catalyst 3650-24TS,
+  IOS-XE 16.12.7) on *Cisco Catalyst by SNMP - PIDC*, with its own dashboard page; `add_cross_connect_fabrics.py`
+  switch entries may now override template and vendor (the group is otherwise Huawei).
+- Pi 1G Colo Fabric: hosts 1G-COLO-SW1/SW2/SW3 renamed to 1G-COLO-DH5-SW1/SW2/SW3 (history kept).
 - **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
 - **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
 - **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).
