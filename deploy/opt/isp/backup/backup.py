@@ -272,7 +272,11 @@ def ensure_checkout():
     git("config", "user.name", "Pi Network Monitoring backup (isp.picloud.in)")
     git("config", "user.email", "backup@isp.picloud.in")
     git("fetch", "-q", "--prune", "origin")
-    git("checkout", "-q", "-B", "main", "origin/main")
+    if git("branch", "--list", "main", capture=True):   # keep local commits that are not pushed yet
+        git("checkout", "-q", "main")
+        git("rebase", "-q", "origin/main")
+    else:
+        git("checkout", "-q", "-b", "main", "origin/main")
 
 
 def nfs_ready():
@@ -341,8 +345,8 @@ def main():
         sec_tar = f"{tmp}/secrets.tar"
         with tarfile.open(sec_tar, "w") as t:
             for p in SECRETS:
-                if os.path.exists(p):
-                    t.add(p)
+                if os.path.exists(p):   # SmokePing credentials (e.g. /root/.credentials/smokeping_admin) left out
+                    t.add(p, filter=lambda ti: None if NOT_BACKED_UP.search(ti.name) else ti)
         encrypt_stream(sec_tar, f"{out}/secrets.tar.zst.gpg")
         os.remove(sec_tar)
         ign = [f"--ignore-table={DB}.{t}" for t in NO_DATA_TABLES]
