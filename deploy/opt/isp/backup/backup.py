@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nightly backup of the Pi Network Monitoring tool (isp.picloud.in).
+"""Nightly backup of the Pi Network Monitoring tool (isp.picloud.in) - the Zabbix tool only (SmokePing excluded).
 
 Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
 
@@ -11,7 +11,6 @@ Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
           one folder per night, all files gpg AES-256 encrypted (the export is readable by any host):
             zabbix-full.sql.zst.gpg      whole Zabbix database incl. graph history
             zabbix-config.sql.zst.gpg    configuration only (no history) - small, quick to restore
-            smokeping-data.tar.zst.gpg   SmokePing RRD data
             secrets.tar.zst.gpg          credentials, TLS keys, original config files with passwords
             MANIFEST.json                time, sizes, SHA-256, matching git commit
           Written as <name>.partial, renamed only after every file was copied and its checksum re-read.
@@ -59,21 +58,15 @@ DUMP = ["mysqldump", "--single-transaction", "--quick", "--routines", "--trigger
 # Deployment files (plain text in git after redaction). Globs; directories are copied recursively.
 FILES = [
     "/opt/isp/zabbix/*.py", "/opt/isp/reports/index.php", "/opt/isp/reports/print-nolinks.js",
-    "/opt/isp/smokeping-gui/index.php", "/opt/isp/ssl/*", "/opt/isp/backup/*",
+    "/opt/isp/ssl/*", "/opt/isp/backup/*",
     "/etc/zabbix/zabbix_server.conf", "/etc/zabbix/web/zabbix.conf.php", "/etc/zabbix/apache.conf",
     "/etc/zabbix/zabbix_agent2.conf", "/etc/zabbix/zabbix_agent2.d", "/etc/zabbix/zabbix_server.d",
     "/etc/zabbix/zabbix_web_service.conf",
     "/etc/apache2/sites-available/isp.picloud.in*.conf", "/etc/apache2/sites-available/000-default.conf",
-    "/etc/apache2/conf-available/smokeping.conf", "/etc/apache2/conf-available/smokeping-gui.conf",
     "/etc/apache2/conf-available/zabbix-reports.conf", "/etc/apache2/conf-available/zabbix-print-nolinks.conf",
     "/etc/mysql/mariadb.conf.d/60-zabbix-tuning.cnf",
     "/etc/systemd/system/mariadb.service.d/oom.conf", "/etc/systemd/system/zabbix-server.service.d/oom.conf",
     "/etc/cron.d/zabbix-*", "/etc/cron.d/pi-netmon-backup",
-    "/etc/smokeping/config", "/etc/smokeping/config.d/General", "/etc/smokeping/config.d/Targets",
-    "/etc/smokeping/config.d/Targets.gui", "/etc/smokeping/config.d/Probes", "/etc/smokeping/config.d/Database",
-    "/etc/smokeping/config.d/Presentation", "/etc/smokeping/config.d/Alerts", "/etc/smokeping/config.d/Slaves",
-    "/etc/smokeping/config.d/pathnames", "/etc/smokeping/basepage.html",
-    "/usr/local/sbin/smokeping-gui-apply", "/etc/sudoers.d/smokeping-gui", "/var/lib/smokeping-gui/devices.json",
     "/etc/letsencrypt/renewal/*.conf",
     "/etc/apt/sources.list.d/zabbix.sources", "/etc/apt/sources.list.d/zabbix-tools.sources",
     "/etc/apt/sources.list.d/google-chrome.sources",
@@ -81,9 +74,10 @@ FILES = [
 SKIP = re.compile(r"(__pycache__|\.pyc$|\.bak|\.orig$|~$)")
 ROOT_DOCS = ("README.md", "RESTORE.md", "CHANGELOG.md", "restore.sh")   # also copied to the top of the repo
 # Secrets bundle (encrypted). Directories recursively.
-SECRETS = ["/root/.credentials", "/etc/letsencrypt", "/etc/zabbix/zabbix_server.conf", "/etc/zabbix/web/zabbix.conf.php",
-           "/etc/smokeping/smokeping_secrets", "/etc/smokeping/htpasswd"]
-PACKAGES = r"^(zabbix|mariadb|apache2|libapache2-mod-php|php8|smokeping|fping|snmp|google-chrome|poppler-utils|certbot|zstd|gpg|nfs-common)"
+SECRETS = ["/root/.credentials", "/etc/letsencrypt", "/etc/zabbix/zabbix_server.conf", "/etc/zabbix/web/zabbix.conf.php"]
+# SmokePing is deliberately not backed up (user request 2026-10-09); its secrets stay on the redaction list below.
+NOT_BACKED_UP = re.compile(r"smokeping", re.I)   # Apache confs / modules list filter
+PACKAGES = r"^(zabbix|mariadb|apache2|libapache2-mod-php|php8|fping|snmp|google-chrome|poppler-utils|certbot|zstd|gpg|nfs-common)"
 
 
 def log(msg):
@@ -205,6 +199,8 @@ def copy_deploy(secrets):
     with open(f"{pkg}/apache-enabled.txt", "w") as out:   # for a2enmod / a2enconf / a2ensite
         for kind, pat in (("mod", "mods-enabled/*.load"), ("conf", "conf-enabled/*.conf"), ("site", "sites-enabled/*.conf")):
             for f in sorted(glob.glob(f"/etc/apache2/{pat}")):
+                if NOT_BACKED_UP.search(f):
+                    continue
                 out.write(f"{kind} {os.path.basename(f).rsplit('.', 1)[0]}\n")
     for f in ROOT_DOCS:
         if os.path.exists(f"/opt/isp/backup/{f}"):
@@ -357,14 +353,8 @@ def main():
         encrypt_stream(cfg_sql, f"{out}/zabbix-config.sql.zst.gpg", level=15)
         os.remove(cfg_sql)
         encrypt_stream(DUMP + [DB], f"{out}/zabbix-full.sql.zst.gpg", level=3)
-        # SmokePing updates its RRD files every few seconds: archive a quick copy, not the live files
-        snap = f"{tmp}/rrd"
-        run(["cp", "-a", "/var/lib/smokeping", snap])
-        encrypt_stream(["tar", "-C", snap, "--transform", "s,^\\.,smokeping,", "-cf", "-", "."],
-                       f"{out}/smokeping-data.tar.zst.gpg", level=3)
-        shutil.rmtree(snap)
         for f, kind in (("secrets.tar.zst.gpg", "secrets"), ("zabbix-config.sql.zst.gpg", "sql"),
-                        ("zabbix-full.sql.zst.gpg", "sql"), ("smokeping-data.tar.zst.gpg", "tar")):
+                        ("zabbix-full.sql.zst.gpg", "sql")):
             verify(f"{out}/{f}", kind)
         sizes = {f: os.path.getsize(f"{out}/{f}") for f in os.listdir(out)}
         log("encrypted + verified: " + ", ".join(f"{f} {s / 1e6:.1f} MB" for f, s in sorted(sizes.items())))

@@ -36,7 +36,6 @@ php8.3-opcache=8.3.6-0ubuntu0.24.04.11
 php8.3-readline=8.3.6-0ubuntu0.24.04.11
 php8.3-xml=8.3.6-0ubuntu0.24.04.11
 poppler-utils=24.02.0-1ubuntu9.10
-smokeping=2.8.2+ds-1
 snmp=5.9.4+dfsg-1.1ubuntu3.2
 snmpd=5.9.4+dfsg-1.1ubuntu3.2
 zabbix-agent2=1:7.0.31-1+ubuntu24.04

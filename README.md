@@ -1,11 +1,14 @@
 # Pi Network Monitoring (isp.picloud.in)
 
-Zabbix 7.0 + SmokePing monitoring for the PIDC network: the A10 load balancer and the three ISP links (Airtel,
+Zabbix 7.0 monitoring for the PIDC network: the A10 load balancer and the three ISP links (Airtel,
 Jio, PowerGrid), the ASR edge routers, and the switch fabrics (WAN, PiSB cloud, VMware 100G, MMR / DH5
 cross-connect, 1G colo). Runs on one Ubuntu 24.04 VM, 172.20.119.99 (24 GB RAM, 8 vCPU).
 
 This repository holds the tool's **complete configuration, documentation and change history**. The data backups
 (database, graph history, secrets) are on the **NFS share**, encrypted. To rebuild the tool: **[RESTORE.md](RESTORE.md)**.
+
+**Scope: the Zabbix tool only.** SmokePing (/smokeping, /smokeping-admin) also runs on this server but is deliberately
+not kept in this repository or in the backups; after a full restore it has to be set up again separately.
 
 | Document | |
 |---|---|
@@ -19,8 +22,6 @@ This repository holds the tool's **complete configuration, documentation and cha
 |---|---|
 | https://isp.picloud.in/zabbix | Zabbix: dashboards, problems, configuration |
 | https://isp.picloud.in/reports | Dashboard PDF (with per-port / per-item charts) and data reports (PDF / CSV) |
-| https://isp.picloud.in/smokeping | Latency / loss graphs for the ISP gateways and DNS servers |
-| https://isp.picloud.in/smokeping-admin | Add / remove SmokePing targets |
 
 ## Repository layout
 
@@ -37,10 +38,9 @@ This repository holds the tool's **complete configuration, documentation and cha
 |---|---|
 | `/opt/isp/zabbix/` | Python scripts that build hosts, templates, alerts and dashboards through the Zabbix API: `add_*.py` (devices), `build_*dashboard.py`, `click_to_graph.py`, `set_default_thresholds.py`, `sync_daily_reports.py`, `setup_email_alerts.py`, `setup_backup_monitoring.py` |
 | `/opt/isp/reports/` | The /reports site |
-| `/opt/isp/smokeping-gui/` | The /smokeping-admin site |
 | `/opt/isp/ssl/` | Let's Encrypt (DNS-01 via acme-dns) scripts |
 | `/opt/isp/backup/` | `backup.py`, `restore.sh`, these documents |
-| `/etc/zabbix/`, `/etc/apache2/`, `/etc/mysql/mariadb.conf.d/60-zabbix-tuning.cnf`, `/etc/smokeping/` | Service configuration |
+| `/etc/zabbix/`, `/etc/apache2/`, `/etc/mysql/mariadb.conf.d/60-zabbix-tuning.cnf` | Service configuration |
 | `/etc/cron.d/` | `zabbix-click-to-graph` (10 min), `zabbix-daily-reports` (hourly), `zabbix-default-thresholds` (hourly), `pi-netmon-backup` (21:00) |
 | `/root/.credentials/` | Passwords, SNMP communities, backup passphrase (root only; backed up only inside the encrypted bundle) |
 
@@ -51,7 +51,7 @@ This repository holds the tool's **complete configuration, documentation and cha
 1. **Git** (this repository, branch `main`): copies every script and config file with secrets redacted, regenerates
    `docs/INVENTORY.md`, and refuses to push if any secret value is found in plain text. Commits only when something changed.
 2. **Encrypted data files** (gpg AES-256): full Zabbix database incl. graph history, configuration-only database,
-   SmokePing data, secrets bundle. Each file is decrypted and checked again before it is copied anywhere.
+   secrets bundle. Each file is decrypted and checked again before it is copied anywhere.
 3. **NFS** `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`): one folder per night,
    e.g. `2026-10-09_2100/`, with `MANIFEST.json` (sizes, SHA-256, matching git commit). A folder gets its final name
    only after every file was copied and its checksum re-read; `LATEST.txt` names the newest. **14 nights kept.**

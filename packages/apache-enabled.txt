@@ -32,8 +32,6 @@ conf localized-error-pages
 conf other-vhosts-access-log
 conf security
 conf serve-cgi-bin
-conf smokeping-gui
-conf smokeping
 conf zabbix-print-nolinks
 conf zabbix-reports
 conf zabbix

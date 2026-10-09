@@ -1,6 +1,8 @@
 # Restore guide
 
-Configuration comes from this git repository; data (database, graph history, SmokePing, secrets) from the
+Scope: the Zabbix tool (Zabbix, /reports, Apache / HTTPS, MariaDB, cron jobs). SmokePing is not backed up.
+
+Configuration comes from this git repository; data (database, graph history, secrets) from the
 encrypted nightly backups on NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`;
 14 nights) or the local copy `/var/backups/pi-network-monitoring` (3 nights). All commands as **root**.
 
@@ -19,8 +21,7 @@ Backup folders (newest first): `ls -1r /mnt/pi-netmon-nfs/ | head` - each has `M
 |---|---|
 | `zabbix-full.sql.zst.gpg` | Whole Zabbix database incl. graph history |
 | `zabbix-config.sql.zst.gpg` | Configuration only (hosts, templates, items, triggers, dashboards, users, alerts, reports) - small |
-| `smokeping-data.tar.zst.gpg` | SmokePing RRD data (`/var/lib/smokeping`) |
-| `secrets.tar.zst.gpg` | `/root/.credentials`, `/etc/letsencrypt` (TLS keys), original `zabbix_server.conf` / `zabbix.conf.php`, SmokePing logins |
+| `secrets.tar.zst.gpg` | `/root/.credentials`, `/etc/letsencrypt` (TLS keys), original `zabbix_server.conf` / `zabbix.conf.php` |
 
 Helper used below (decrypt + decompress to stdout):
 ```bash
@@ -51,8 +52,7 @@ dec $B/zabbix-full.sql.zst.gpg | mysql zabbix                   # with graph his
 #   or: dec $B/zabbix-config.sql.zst.gpg | mysql zabbix          # configuration only, much faster
 systemctl start zabbix-server                                   # MariaDB and Zabbix: restart separately, never together
 ```
-Then check https://isp.picloud.in/zabbix. SmokePing data, if needed:
-`systemctl stop smokeping && dec $B/smokeping-data.tar.zst.gpg | tar -C /var/lib -xpf - && systemctl start smokeping`.
+Then check https://isp.picloud.in/zabbix.
 
 ---
 
@@ -77,13 +77,14 @@ dl.google.com and the NFS server 172.16.95.5, and the backup passphrase.
    Options: `--backup-dir /mnt/pi-netmon-nfs/<date>` for an older night; `--config-only` to skip graph history.
 
    `restore.sh`: mounts the NFS share (fstab automount) and checks the backup's checksums → installs Zabbix 7.0,
-   MariaDB, Apache + PHP, SmokePing, Chrome and tools → puts every script and config file back (real passwords from
+   MariaDB, Apache + PHP, Chrome and tools → puts every script and config file back (real passwords from
    the secrets bundle, owners and modes as recorded) → MariaDB tuning, `zabbix` database and user → imports the
-   database → SmokePing data → Apache modules / sites → starts everything and prints the service states.
+   database → Apache modules / sites → starts everything and prints the service states.
 3. **After the restore**
    - Same IP (172.20.119.99) is easiest. Otherwise point `isp.picloud.in` (internal DNS) at the new IP and allow
      SNMP from it on every device (A10, routers and switches have SNMP ACLs).
-   - Open https://isp.picloud.in/zabbix (same accounts), /reports, /smokeping. Data arrives within ~2 minutes.
+   - Open https://isp.picloud.in/zabbix (same accounts) and /reports. Data arrives within ~2 minutes.
+   - SmokePing is not part of the backup: install and configure it separately if it is wanted on the new server.
    - The TLS certificate comes from the bundle; renewal works as before.
    - `rm /root/backup_passphrase` (it is now in `/root/.credentials/backup_passphrase`).
    - Run one backup by hand: `/opt/isp/backup/backup.py`.

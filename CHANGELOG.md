@@ -6,9 +6,11 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
 ## 2026-10-09
 
 ### Backups
+- Scope reduced to the Zabbix tool: SmokePing (configuration, /smokeping-admin editor, data, logins) removed from
+  the repository and from the backups; it keeps running on the server but is not backed up.
 - Nightly backup at 21:00 IST (`/opt/isp/backup/backup.py`): configuration + documentation to this repository
   (secrets redacted, push blocked if any secret is found); encrypted data backups (full database incl. graph
-  history, configuration database, SmokePing data, secrets bundle) to NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring`
+  history, configuration database, secrets bundle) to NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring`
   (14 nights) and locally (3 nights). Zabbix alerts when a backup fails or none succeeded for 26 h.
 - `restore.sh` and RESTORE.md for single files, the database, or a full rebuild on a new server.
 - Zabbix database password rotated.
