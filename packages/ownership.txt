@@ -12,6 +12,7 @@
 644 root root /opt/isp/zabbix/click_to_graph.py
 750 root root /opt/isp/zabbix/customer_view.py
 644 root root /opt/isp/zabbix/set_default_thresholds.py
+644 root root /opt/isp/zabbix/setup_backup_monitoring.py
 750 root root /opt/isp/zabbix/setup_email_alerts.py
 750 root root /opt/isp/zabbix/setup_isp_links.py
 750 root root /opt/isp/zabbix/sync_daily_reports.py
