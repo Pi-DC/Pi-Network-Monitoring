@@ -78,4 +78,4 @@ Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-dev
 
 - Configuration and documentation: this repository (branch `main`).
 - Data: NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`), one encrypted folder per night, 14 nights kept.
-- Local copy: `/var/backups/pi-network-monitoring`, 3 nights.
+- No backup copy is kept on the server's local disk.

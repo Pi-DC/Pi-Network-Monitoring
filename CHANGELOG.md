@@ -61,6 +61,8 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
   `vm.min_free_kbytes` 256 MB. `StartPingers` 1 -> 4 (the single ICMP pinger was 71 % busy).
 - Backup: a `--no-push` check run left its changes staged, which made the next real run fail at the git rebase
   (no push, no NFS copy). The checkout is now cleaned before syncing and the check run unstages again.
+- Backup: **no local copy any more** (user request) - data backups go to NFS only; the 3-night local copy in
+  `/var/backups/pi-network-monitoring` was removed (every folder was verified to exist on NFS first).
 - **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
 - **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
 - **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).

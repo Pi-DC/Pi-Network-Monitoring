@@ -15,7 +15,8 @@ Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
             MANIFEST.json                time, sizes, SHA-256, matching git commit
           Written as <name>.partial, renamed only after every file was copied and its checksum re-read.
           LATEST.txt names the newest complete backup. Kept KEEP_NFS_DAYS nights.
-  Local   /var/backups/pi-network-monitoring: the same folder, last KEEP_LOCAL_DAYS nights (fast restore).
+  No copy is kept on the local disk (user request 2026-10-09): the run's working folder in /var/tmp is deleted at
+  the end of every run, also when it fails.
 
 Every encrypted file is decrypted again and checked before it is copied anywhere. Any failure stops the run and
 leaves the previous backups untouched; /var/lib/pi-netmon-backup/status/last-result ("OK ..." / "FAILED ...")
@@ -45,9 +46,7 @@ CHECKOUT = f"{WORK}/repo"
 STATUS = f"{WORK}/status"
 NFS = "/mnt/pi-netmon-nfs"
 NFS_SOURCE = "172.16.95.5:/Repo_BDR/Pi-Network-Monitoring"
-LOCAL = "/var/backups/pi-network-monitoring"
 KEEP_NFS_DAYS = 14
-KEEP_LOCAL_DAYS = 3
 PASSPHRASE = "/root/.credentials/backup_passphrase"
 DB = "zabbix"
 NO_DATA_TABLES = ["history", "history_uint", "history_str", "history_text", "history_log", "history_bin",
@@ -249,7 +248,7 @@ def write_inventory():
     out += ["", "## Backups", "",
             f"- Configuration and documentation: this repository (branch `main`).",
             f"- Data: NFS `{NFS_SOURCE}` (mounted on `{NFS}`), one encrypted folder per night, {KEEP_NFS_DAYS} nights kept.",
-            f"- Local copy: `{LOCAL}`, {KEEP_LOCAL_DAYS} nights.", ""]
+            "- No backup copy is kept on the server's local disk.", ""]
     os.makedirs(f"{CHECKOUT}/docs", exist_ok=True)
     open(f"{CHECKOUT}/docs/INVENTORY.md", "w").write("\n".join(out))
 
@@ -383,7 +382,7 @@ def main():
         git("push", "-q", "origin", "main")
         rev = git("rev-parse", "HEAD", capture=True)
 
-        # 4. manifest, then NFS (verified copy) and local
+        # 4. manifest, then NFS (verified copy) - nothing is kept locally
         manifest = {
             "created": datetime.datetime.now().isoformat(timespec="seconds"), "host": os.uname().nodename,
             "git_commit_main": rev, "zabbix_version": run(["zabbix_server", "-V"], capture_output=True,
@@ -394,11 +393,10 @@ def main():
         open(f"{out}/MANIFEST.json", "w").write(json.dumps(manifest, indent=2) + "\n")
         nfs_ready()
         publish(out, NFS, KEEP_NFS_DAYS, stamp)
-        publish(out, LOCAL, KEEP_LOCAL_DAYS, stamp)
         total = sum(sizes.values()) / 1e9
         write_status(True, f"backup {stamp}: git {rev[:7]}, NFS {NFS_SOURCE}/{stamp} ({total:.2f} GB), "
                            f"{time.time() - started:.0f}s")
-        log(f"done: git main {rev[:7]}, NFS + local folder {stamp} ({total:.2f} GB)")
+        log(f"done: git main {rev[:7]}, NFS folder {stamp} ({total:.2f} GB)")
     except Exception as e:
         if not dry:   # a check run must not raise or clear the Zabbix backup alert
             write_status(False, f"backup {stamp}: {str(e)[:300]}")

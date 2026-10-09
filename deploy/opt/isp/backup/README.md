@@ -55,7 +55,7 @@ not kept in this repository or in the backups; after a full restore it has to be
 3. **NFS** `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`): one folder per night,
    e.g. `2026-10-09_2100/`, with `MANIFEST.json` (sizes, SHA-256, matching git commit). A folder gets its final name
    only after every file was copied and its checksum re-read; `LATEST.txt` names the newest. **14 nights kept.**
-4. **Local copy** in `/var/backups/pi-network-monitoring/`: the same folder, last 3 nights, for fast restores.
+4. **No local copy**: backups are kept only on NFS (and git), never on the server's own disk.
 5. **Zabbix watches it**: host *Zabbix server*, items *Backup: last result* / *Backup: last success time*;
    High alert by e-mail if a backup fails or none succeeded for 26 hours.
 

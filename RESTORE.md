@@ -4,7 +4,7 @@ Scope: the Zabbix tool (Zabbix, /reports, Apache / HTTPS, MariaDB, cron jobs). S
 
 Configuration comes from this git repository; data (database, graph history, secrets) from the
 encrypted nightly backups on NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`;
-14 nights) or the local copy `/var/backups/pi-network-monitoring` (3 nights). All commands as **root**.
+14 nights; no copy is kept on the server itself). All commands as **root**.
 
 You always need the **backup passphrase** (kept outside the server; on a working server it is
 `/root/.credentials/backup_passphrase`).

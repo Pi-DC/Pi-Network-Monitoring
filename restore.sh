@@ -66,8 +66,8 @@ while read -r mode owner group path; do                          # owners / mode
   [ -e "$path" ] && chown "$owner:$group" "$path" && chmod "$mode" "$path"
 done < "$REPO/packages/ownership.txt"
 if grep -rl "__REDACTED__" /etc /opt/isp /usr/local/sbin 2>/dev/null; then echo "redacted value left in a live file"; exit 1; fi
-mkdir -p /var/lib/pi-netmon-backup/status /var/backups/pi-network-monitoring
-chmod 700 /var/backups/pi-network-monitoring; chmod 755 /var/lib/pi-netmon-backup /var/lib/pi-netmon-backup/status
+mkdir -p /var/lib/pi-netmon-backup/status
+chmod 755 /var/lib/pi-netmon-backup /var/lib/pi-netmon-backup/status
 systemctl daemon-reload
 
 step "5/9 MariaDB (tuning, database, user)"
