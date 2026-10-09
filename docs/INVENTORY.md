@@ -2,7 +2,7 @@
 
 Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by hand.
 
-## Monitored devices (31 enabled, 31 total)
+## Monitored devices (34 enabled, 34 total)
 
 | Group | Host | Name | IP | Model / vendor | Template | Status |
 |---|---|---|---|---|---|---|
@@ -11,10 +11,11 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | Pi 1G Colo Fabric | 1G-COLO-DH5-SW1 | 1G-COLO-DH5-SW1 (Huawei-1G-Colo-SW1) | 10.128.16.27 | Huawei S5720-28P-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
 | Pi 1G Colo Fabric | 1G-COLO-DH5-SW2 | 1G-COLO-DH5-SW2 (Huawei-1G-Colo-SW2) | 172.16.132.4 | Huawei S5720-28P-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
 | Pi 1G Colo Fabric | 1G-COLO-DH5-SW3 | 1G-COLO-DH5-SW3 (Huawei-1G-Colo-SW3) | 172.16.131.33 | Huawei S5720-28X-PWR-LI-AC | Huawei VRP by SNMP - PIDC | enabled |
-| Pi DH5 Cross Connect Fabric | DH5_SW1 | DH5_SW1 (DH5-SW1-100Mb) | 10.128.4.222 | Catalyst 2960 | Cisco Catalyst by SNMP - PIDC | enabled |
-| Pi DH5 Cross Connect Fabric | DH5_SW2 | DH5_SW2 (DH5-SW2-1G) | 10.128.4.218 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
-| Pi DH5 Cross Connect Fabric | DH5_SW3 | DH5_SW3 (DH5-SW3-1G) | 10.128.4.217 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
-| Pi DH5 Cross Connect Fabric | DH5_SW4 | DH5_SW4 (DH5-Ext-SW4) | 172.18.127.207 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
+| Pi 1G Colo Fabric | 1G-COLO-DH5-SW5 | 1G-COLO-DH5-SW5 (1G-COLO-SW-5) | 172.18.127.209 | Catalyst 3650-48FQ | Cisco Catalyst by SNMP - PIDC | enabled |
+| Pi DH Cross Connect Fabric | DH5_SW1 | DH5_SW1 (DH5-SW1-100Mb) | 10.128.4.222 | Catalyst 2960 | Cisco Catalyst by SNMP - PIDC | enabled |
+| Pi DH Cross Connect Fabric | DH5_SW2 | DH5_SW2 (DH5-SW2-1G) | 10.128.4.218 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
+| Pi DH Cross Connect Fabric | DH5_SW3 | DH5_SW3 (DH5-SW3-1G) | 10.128.4.217 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
+| Pi DH Cross Connect Fabric | DH5_SW4 | DH5_SW4 (DH5-Ext-SW4) | 172.18.127.207 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi MMR Cross Connect Fabric | MMR1_SW1 | MMR1_SW1 (PIDC-MMR-1-Ext-SW1) | 10.128.4.221 | Catalyst 2960 | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi MMR Cross Connect Fabric | MMR1_SW2 | MMR1_SW2 (MMR1-Ext-SW2) | 10.128.4.220 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi MMR Cross Connect Fabric | MMR1_SW3 | MMR1_SW3 (MMR1-Ext-SW3) | 10.128.4.219 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
@@ -36,6 +37,8 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | WAN Routers | ASR_RTR-2 | ASR_RTR-2 (ASR_RTR_2_JIO) | 10.128.17.15 | cisco | Cisco ASR920 by SNMP - PIDC | enabled |
 | WAN Switches | 10G-WAN-Switch01 | 10G-WAN-Switch01 (PIDC-COLO-10G-SW1) | 10.128.17.27 | arista | Arista by SNMP - PIDC | enabled |
 | WAN Switches | 10G-WAN-Switch02 | 10G-WAN-Switch02 (PIDC-COLO-10G-SW2) | 10.128.17.28 | arista | Arista by SNMP - PIDC | enabled |
+| WAN Switches | 1G-WAN-Extension-SW | 1G-WAN-Extension-SW (SNMP-JUN-Switch-Azure) | 10.128.4.197 | Juniper EX3400-24T (2-member Virtual Chassis) | Juniper by SNMP - PIDC | enabled |
+| WAN Switches | 1G-WAN-SW | 1G-WAN-SW (AMRPiDC-WANSW001) | 10.128.16.21 | Catalyst 3650-24TS-S (3-member stack) | Cisco Catalyst by SNMP - PIDC | enabled |
 | Zabbix servers | Zabbix server | Zabbix server | 127.0.0.1 |  | Linux by Zabbix agent, Zabbix server health | enabled |
 
 ## Dashboards
@@ -47,17 +50,17 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | 57 | Zabbix server | 1 | yes |
 | 401 | A10 LLB & ISP Links | 6 | yes |
 | 402 | ISP Link Status | 2 | yes |
-| 404 | WAN Switches | 3 | yes |
+| 404 | WAN Switches | 5 | yes |
 | 405 | PiSB Cloud Fabric | 5 | yes |
 | 407 | ASR Routers | 3 | yes |
 | 414 | Pi VMware Fabric | 9 | yes |
 | 415 | Pi MMR Cross Connect Fabric | 6 | yes |
-| 416 | Pi DH5 Cross Connect Fabric | 5 | yes |
-| 418 | Pi 1G Colo Fabric | 5 | yes |
+| 416 | Pi DH Cross Connect Fabric | 5 | yes |
+| 418 | Pi 1G Colo Fabric | 6 | yes |
 
 ## E-mail alerting
 
-- **ISP link alerts**: severity Average and above on A10-LLB, Pi 1G Colo Fabric, Pi DH5 Cross Connect Fabric, Pi MMR Cross Connect Fabric, Pi VMware Fabric, PiSB Cloud Switches, WAN Routers, WAN Switches, Zabbix server
+- **ISP link alerts**: severity Average and above on A10-LLB, Pi 1G Colo Fabric, Pi DH Cross Connect Fabric, Pi MMR Cross Connect Fabric, Pi VMware Fabric, PiSB Cloud Switches, WAN Routers, WAN Switches, Zabbix server
 - **SSL certificate alerts**: severity Average and above on Zabbix server
 
 Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-device exceptions are host macros.
@@ -68,7 +71,8 @@ Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-dev
 - `zabbix-click-to-graph`: `*/10 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 click_to_graph.py >> /var/log/zabbix/click-to-graph.log 2>&1`
 - `zabbix-daily-reports`: `15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1`
 - `zabbix-default-thresholds`: `40 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 set_default_thresholds.py >> /var/log/zabbix/default-thresholds.log 2>&1`
-- `zabbix-uptime-wrap`: `50 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 fix_uptime_wrap.py >> /var/log/zabbix/uptime-wrap.log 2>&1`
+- `zabbix-device-uptime`: `* * * * * root cd /opt/isp/zabbix && /usr/bin/python3 device_uptime.py >> /var/log/zabbix/device-uptime.log 2>&1`
+- `zabbix-device-uptime`: `55 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 device_uptime.py --setup >> /var/log/zabbix/device-uptime.log 2>&1`
 
 ## Backups
 

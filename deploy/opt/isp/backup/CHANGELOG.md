@@ -33,6 +33,27 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
   IOS-XE 16.12.7) on *Cisco Catalyst by SNMP - PIDC*, with its own dashboard page; `add_cross_connect_fabrics.py`
   switch entries may now override template and vendor (the group is otherwise Huawei).
 - Pi 1G Colo Fabric: hosts 1G-COLO-SW1/SW2/SW3 renamed to 1G-COLO-DH5-SW1/SW2/SW3 (history kept).
+- **WAN Switches**: added 1G-WAN-SW 10.128.16.21 (AMRPiDC-WANSW001, Catalyst 3650-24TS-S 3-member stack, IOS-XE
+  16.3.7) on *Cisco Catalyst by SNMP - PIDC* (`add_cross_connect_fabrics.py`, group may now set its role tag).
+  The WAN Switches dashboard keeps the Arista 10G pair pages unchanged and adds, for any other switch in the
+  group, the vendor-neutral switch page plus an Overview health table and port map. `build_fabric_dashboard.py`:
+  the per-switch page is now the reusable `switch_page()` (fabric dashboards unchanged).
+- **WAN Switches**: added 1G-WAN-Extension-SW 10.128.4.197 (SNMP-JUN-Switch-Azure, Juniper EX3400-24T 2-member
+  Virtual Chassis, Junos 15.1X53-D57.3). New template *Juniper by SNMP - PIDC* (stock copy: traffic 10 s, status
+  30 s, errors 1 min, Port state; "Health: ..." items count fans / PSUs in state 6 = down, since running, full
+  speed and standby are all fine); Juniper hosts discover physical ports, ae bundles and me0 only. At setup the
+  switch reported 1 major (red) + 1 minor (yellow) chassis alarm -> "System status is in critical state".
+- Dashboard and host group "Pi DH5 Cross Connect Fabric" renamed to **"Pi DH Cross Connect Fabric"** (same IDs:
+  e-mail alerts and the daily PDF report carry over; report renamed by `sync_daily_reports.py`).
+- **Uptime now comes from the devices themselves**, not the SNMP agent: Huawei hwEntityUpTime (main board, seconds,
+  never wraps), else hrSystemUptime (OS uptime: Arista, Juniper, A10), else sysUpTime (Cisco IOS/IOS-XE and HPE
+  Comware, which count it from the last reload). 497.1-day roll-overs of the 32-bit counters are counted as they
+  happen by `device_uptime.py` (every minute, `/etc/cron.d/zabbix-device-uptime`), which sends "Uptime (network)" /
+  "Uptime (hardware)" (now trapper items, history kept); any other drop = reboot. Roll-overs from before monitoring:
+  host macro `{$UPTIME.WRAPS}` (after checking the CLI), else snmpEngineTime as a lower bound only.
+  Replaces `fix_uptime_wrap.py` (removed with its cron).
+- **Pi 1G Colo Fabric**: added 1G-COLO-DH5-SW5 172.18.127.209 (1G-COLO-SW-5, Cisco Catalyst 3650-48FQ, IOS-XE
+  16.12.8, 2x 1025 W PSU) on *Cisco Catalyst by SNMP - PIDC*, with its own dashboard page.
 - **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
 - **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
 - **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).

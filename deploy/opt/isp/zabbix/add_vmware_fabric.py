@@ -24,6 +24,13 @@ ARISTA = "Arista by SNMP - PIDC"
 COMWARE, COMWARE_SRC = "HPE Comware by SNMP - PIDC", "HP Comware HH3C by SNMP"
 CATALYST, CATALYST_SRC = "Cisco Catalyst by SNMP - PIDC", "Cisco IOS by SNMP"
 HUAWEI, HUAWEI_SRC = "Huawei VRP by SNMP - PIDC", "Huawei VRP by SNMP"   # S5720 (1G colo fabric)
+JUNIPER, JUNIPER_SRC = "Juniper by SNMP - PIDC", "Juniper by SNMP"   # EX3400 (1G-WAN-Extension-SW)
+# Per-vendor host macros added at host creation. Junos lists many internal and logical interfaces (ge-0/0/0.0,
+# irb, pfe-, vcp-, bme0 ...): discover physical ports, ae bundles and the me0 management port only.
+VENDOR_MACROS = {
+    "juniper": [{"macro": "{$NET.IF.IFNAME.MATCHES}", "value": r"^((ge|xe|et|mge)-[0-9]+/[0-9]+/[0-9]+|ae[0-9]+|me0)$",
+                 "description": "Physical ports, ae bundles and me0 only (no logical units or internal interfaces)"}],
+}
 ICMP_ONLY = "ICMP Ping"
 SWITCHES = [  # host, visible name, IP, template, role, vendor, enabled
     ("100G_Spine_SW-1", "100G_Spine_SW-1 (GE35SS01)", "172.20.96.33", ARISTA, "spine", "arista", True),
@@ -66,11 +73,17 @@ HEALTH = {
     # (count stays 0)
     HUAWEI: {"cpu": "max(last_foreach(//system.cpu.util[*]))", "mem": "max(last_foreach(//vm.memory.util[*]))",
              "fan_ok": 1, "psu_ok": 1},
+    # jnxOperatingState: 2 running, 3 ready, 5 runningAtFullSpeed, 7 standby are all fine - count 6 = down only
+    JUNIPER: {"cpu": "max(last_foreach(//system.cpu.util[*]))", "mem": "max(last_foreach(//vm.memory.util[*]))",
+              "fan_bad": 6, "psu_bad": 6},
 }
 
 
-def not_ok(key, h, ok):
-    """Calculated-item formula: number of `key` items not in the OK state (empty slots excluded where known)."""
+def not_ok(key, h, ok, bad=None):
+    """Calculated-item formula: number of `key` items not in the OK state (empty slots excluded where known),
+    or - for vendors with several good states - the number in the `bad` state."""
+    if bad is not None:
+        return f'count(last_foreach(//{key}[*]),"eq",{bad})'
     f = f'count(last_foreach(//{key}[*]),"ne",{ok})'
     return f + (f'-count(last_foreach(//{key}[*]),"eq",{h["absent"]})' if "absent" in h else "")
 
@@ -83,8 +96,8 @@ def health_items(z, template):
             ("health.cpu", "Health: CPU utilization", h["cpu"], "%", 0),
             ("health.memory", "Health: Memory utilization", h["mem"], "%", 0),
             ("health.temp.max", "Health: Highest temperature", "max(last_foreach(//sensor.temp.value[*]))", "°C", 0),
-            ("health.fans.bad", "Health: Fans not OK", not_ok("sensor.fan.status", h, h["fan_ok"]), "", 3),
-            ("health.psu.bad", "Health: Power supplies not OK", not_ok("sensor.psu.status", h, h["psu_ok"]), "", 3),
+            ("health.fans.bad", "Health: Fans not OK", not_ok("sensor.fan.status", h, h.get("fan_ok"), h.get("fan_bad")), "", 3),
+            ("health.psu.bad", "Health: Power supplies not OK", not_ok("sensor.psu.status", h, h.get("psu_ok"), h.get("psu_bad")), "", 3),
             # all-port totals (a graph widget cannot sum more than ~100 items itself)
             ("health.if.in.errors", "Health: Inbound errors, all ports", "sum(last_foreach(//net.if.in.errors[*]))", "", 0),
             ("health.if.out.errors", "Health: Outbound errors, all ports", "sum(last_foreach(//net.if.out.errors[*]))", "", 0),
@@ -182,6 +195,12 @@ def add_huawei_psu(z, tid):
     R.ensure_trigger(z, rule, "{#PSU_NAME}: power supply is not supplying power", priority=3,
                      expression=f"last(/{HUAWEI}/{key})<>1", tags=[{"tag": "scope", "value": "availability"}],
                      comments="hwEntityPwrState is not 'supply': no input power, failed, or removed.")
+
+
+def setup_juniper(z):
+    setup_snmp_get_template(z, JUNIPER_SRC, JUNIPER, (
+        "PIDC copy of 'Juniper by SNMP' for EX switches: traffic 10s, status 30s, errors 1m, Admin status + "
+        "Port state. Managed by /opt/isp/zabbix/add_vmware_fabric.py / add_cross_connect_fabrics.py."))
 
 
 def setup_catalyst(z):

@@ -18,7 +18,7 @@ RECIPIENTS = ["compute@pidatacenters.com", "network@pidatacenters.com"]
 ACTION = "ISP link alerts"
 MIN_SEVERITY = "3"   # 3 = Average; 4 = High; 5 = Disaster
 SWITCH_GROUPS = ["WAN Switches", "PiSB Cloud Switches", "WAN Routers", "Pi VMware Fabric", "Pi MMR Cross Connect Fabric",
-                 "Pi DH5 Cross Connect Fabric", "Pi 1G Colo Fabric"]
+                 "Pi DH Cross Connect Fabric", "Pi 1G Colo Fabric"]
 # The monitoring server itself: cache-usage / low-memory / VM memory and disk problems, so a full cache or memory
 # shortage is mailed before it can crash Zabbix (added 2026-10-09).
 SELF_HOST = "Zabbix server"

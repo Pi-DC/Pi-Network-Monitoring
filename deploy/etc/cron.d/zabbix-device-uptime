@@ -1,0 +1,4 @@
+# Device uptime from the devices themselves (hwEntityUpTime / hrSystemUptime / sysUpTime), 497-day roll-overs counted.
+# Script: /opt/isp/zabbix/device_uptime.py - every minute: compute + send; hourly --setup: templates linked later.
+* * * * * root cd /opt/isp/zabbix && /usr/bin/python3 device_uptime.py >> /var/log/zabbix/device-uptime.log 2>&1
+55 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 device_uptime.py --setup >> /var/log/zabbix/device-uptime.log 2>&1

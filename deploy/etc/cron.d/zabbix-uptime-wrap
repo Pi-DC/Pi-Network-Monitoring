@@ -1,3 +1,0 @@
-# Correct SNMP uptime for the 32-bit TimeTicks wrap (497.1 days) on every SNMP template linked to a host,
-# including templates linked later. Script: /opt/isp/zabbix/fix_uptime_wrap.py - output only when something changed.
-50 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 fix_uptime_wrap.py >> /var/log/zabbix/uptime-wrap.log 2>&1

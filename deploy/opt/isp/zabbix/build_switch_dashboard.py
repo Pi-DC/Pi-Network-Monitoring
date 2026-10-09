@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Build the Arista switch dashboards.
 
-  "WAN Switches"        - the 10G WAN pair (Overview with both side by side + a page per switch)
+  "WAN Switches"        - the 10G WAN pair (Overview with both side by side + a page per switch); any other switch
+                          in the host group (e.g. the Catalyst 1G-WAN-SW) gets the vendor-neutral page of
+                          build_fabric_dashboard.switch_page and a port map on the Overview
   "PiSB Cloud Fabric"   - spine/leaf fabric (Overview health table + fabric graphs + a page per switch)
 
 Re-runnable: each dashboard is rebuilt in place. Run after add_switches.py.
@@ -134,9 +136,14 @@ def health_table(name, x, y, w, h, groupid):
 
 
 def build(z, cfg):
+    import build_fabric_dashboard as fb   # imports this module, so import it at run time
     gid = z.call("hostgroup.get", {"filter": {"name": [cfg["group"]]}, "output": ["groupid"]})[0]["groupid"]
-    hosts = {h["host"]: h for h in z.call("host.get", {"groupids": gid, "output": ["hostid", "host", "name"]})}
+    hosts = {h["host"]: h for h in z.call("host.get", {"groupids": gid, "output": ["hostid", "host", "name"],
+                                                       "selectTags": ["tag", "value"]})}
     switches = cfg["switches"]
+    others = sorted((h for host, h in hosts.items() if host not in {s[0] for s in switches}
+                     and z.call("host.get", {"hostids": h["hostid"], "filter": {"status": 0}, "countOutput": True}) != "0"),
+                    key=lambda h: h["host"])   # enabled switches of other vendors, not in cfg["switches"]
     vis = {host: hosts[host]["name"] for host, _, _ in switches}
 
     def items_of(host):
@@ -175,7 +182,17 @@ def build(z, cfg):
             {"items": ["Interface Port-Channel52(*): Bits received"], "color": "2563EB", "label": "Jio in", "fill": 2},
             {"items": ["Interface Port-Channel52(*): Bits sent"], "color": "0EA5E9", "label": "Jio out"},
         ], legend_lines=8))
-        ov.append(problems(f"{cfg['name']} problems (current and recent)", 0, 22, 72, 5, groupid=gid))
+        y = 22
+        if others:
+            table_h = 2 + (len(hosts) + 1) // 2
+            ov.append(fb.health_table("All WAN switches health (one row per switch)", 0, y, 72, table_h, gid))
+            y += table_h
+            for h in others:
+                mh = 7 if fb.port_count(z, h) > 80 else 6
+                ov.append(honeycomb(f"{h['name']} interfaces ({MAP_LEGEND})", 0, y, 72, mh, h["hostid"],
+                                    IF_STATE_ITEMS, IF_STATUS_TH))
+                y += mh
+        ov.append(problems(f"{cfg['name']} problems (current and recent)", 0, y, 72, 5, groupid=gid))
     else:   # spine/leaf fabric
         spines = [vis[h] for h, _, r in switches if r == "spine"]
         leaves = [vis[h] for h, _, r in switches if r == "leaf"]
@@ -263,6 +280,8 @@ def build(z, cfg):
             problems(f"{short} problems", 48, 58, 24, 6, hostid=hid),
         ]
         pages.append({"name": f"{host} ({short})", "widgets": w})
+    for n, h in enumerate(others):   # other vendors: the vendor-neutral fabric page
+        pages.append(fb.switch_page(z, h, len(switches) + n, fb.port_count(z, h), page_name=h["name"]))
 
     dash = z.call("dashboard.get", {"filter": {"name": [cfg["name"]]}, "output": ["dashboardid"]})
     click_to_graph.link_pages(pages, cfg["name"], z=z)   # page item list + graphs where there is room
