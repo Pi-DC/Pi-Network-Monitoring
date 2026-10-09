@@ -67,6 +67,7 @@ Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-dev
 - `zabbix-click-to-graph`: `*/10 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 click_to_graph.py >> /var/log/zabbix/click-to-graph.log 2>&1`
 - `zabbix-daily-reports`: `15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1`
 - `zabbix-default-thresholds`: `40 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 set_default_thresholds.py >> /var/log/zabbix/default-thresholds.log 2>&1`
+- `zabbix-uptime-wrap`: `50 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 fix_uptime_wrap.py >> /var/log/zabbix/uptime-wrap.log 2>&1`
 
 ## Backups
 

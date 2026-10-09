@@ -24,6 +24,11 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
 - *Huawei VRP by SNMP - PIDC*: power supply monitoring (hwPwrStatusTable): discovers only PSUs the switch names
   as installed (empty slots, which report "notSupply", are skipped), status per PSU, alert when not supplying
   power; feeds "Health: Power supplies not OK". S5720-LI has no such table (nothing discovered).
+- **Uptime fixed on all SNMP devices**: sysUpTime / hrSystemUptime are 32-bit and wrap to 0 every 497.1 days, so
+  17 devices showed 497 days too little (e.g. 10G-WAN-Switch02 98 days instead of 85 weeks). "Uptime (network)" /
+  "Uptime (hardware)" are now calculated: raw value + 497.1 days x wraps, wraps derived from snmpEngineTime (raw
+  values kept as "SNMP raw: ..." items). `fix_uptime_wrap.py`, hourly cron `/etc/cron.d/zabbix-uptime-wrap`, covers
+  every SNMP template linked to a host (incl. stock "Generic by SNMP" used by the A10).
 - **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
 - **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
 - **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).
