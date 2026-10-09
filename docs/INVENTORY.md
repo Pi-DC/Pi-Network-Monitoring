@@ -2,7 +2,7 @@
 
 Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by hand.
 
-## Monitored devices (29 enabled, 30 total)
+## Monitored devices (30 enabled, 30 total)
 
 | Group | Host | Name | IP | Model / vendor | Template | Status |
 |---|---|---|---|---|---|---|
@@ -21,7 +21,7 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | Pi MMR Cross Connect Fabric | MMR1-SW5 | MMR1-SW5 (MMR1-Ext-SW5) | 10.128.4.209 | Catalyst 2960X | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi VMware Fabric | 100G_Leaf_SW-1 | 100G_Leaf_SW-1 (GE33LS01) | 172.20.96.19 | arista | Arista by SNMP - PIDC | enabled |
 | Pi VMware Fabric | 100G_Leaf_SW-2 | 100G_Leaf_SW-2 (GE33LS02) | 172.20.96.18 | arista | Arista by SNMP - PIDC | enabled |
-| Pi VMware Fabric | 100G_Leaf_SW-3-4 | 100G_Leaf_SW-3&4 | 172.20.96.16 | unknown | ICMP Ping | **disabled** |
+| Pi VMware Fabric | 100G_Leaf_SW-3-4 | 100G_Leaf_SW-3&4 (100G-Leaf-3 & Leaf-4) | 172.20.96.16 | huawei | Huawei VRP by SNMP - PIDC | enabled |
 | Pi VMware Fabric | 100G_Leaf_SW-5 | 100G_Leaf_SW-5 (PiAMRDC-100G-LFSW-05) | 172.20.96.35 | arista | Arista by SNMP - PIDC | enabled |
 | Pi VMware Fabric | 100G_Leaf_SW-6 | 100G_Leaf_SW-6 (PiAMRDC-100G-LFSW-06) | 172.20.96.36 | arista | Arista by SNMP - PIDC | enabled |
 | Pi VMware Fabric | 100G_Leaf_SW-7-8 | 100G-Leaf_SW-7&8 (100G-LF-7&8) | 172.20.97.212 | hpe | HPE Comware by SNMP - PIDC | enabled |
@@ -49,7 +49,7 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | 404 | WAN Switches | 3 | yes |
 | 405 | PiSB Cloud Fabric | 5 | yes |
 | 407 | ASR Routers | 3 | yes |
-| 414 | Pi VMware Fabric | 8 | yes |
+| 414 | Pi VMware Fabric | 9 | yes |
 | 415 | Pi MMR Cross Connect Fabric | 6 | yes |
 | 416 | Pi DH5 Cross Connect Fabric | 5 | yes |
 | 418 | Pi 1G Colo Fabric | 4 | yes |

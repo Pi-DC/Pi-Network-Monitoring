@@ -30,7 +30,8 @@ SWITCHES = [  # host, visible name, IP, template, role, vendor, enabled
     ("100G_Spine_SW-2", "100G_Spine_SW-2 (GE35SS02)", "172.20.96.34", ARISTA, "spine", "arista", True),
     ("100G_Leaf_SW-1", "100G_Leaf_SW-1 (GE33LS01)", "172.20.96.19", ARISTA, "leaf", "arista", True),   # DCS-7050SX3-48YC12
     ("100G_Leaf_SW-2", "100G_Leaf_SW-2 (GE33LS02)", "172.20.96.18", ARISTA, "leaf", "arista", True),   # DCS-7050SX3-48YC12
-    ("100G_Leaf_SW-3-4", "100G_Leaf_SW-3&4", "172.20.96.16", ICMP_ONLY, "leaf", "unknown", False),
+    ("100G_Leaf_SW-3-4", "100G_Leaf_SW-3&4 (100G-Leaf-3 & Leaf-4)", "172.20.96.16", HUAWEI, "leaf", "huawei", True),
+    # ^ Huawei S6720S-26Q-EI-24S-AC iStack (2 members); unreachable when first added, answered ping/SNMP 2026-10-09
     ("100G_Leaf_SW-5", "100G_Leaf_SW-5 (PiAMRDC-100G-LFSW-05)", "172.20.96.35", ARISTA, "leaf", "arista", True),
     ("100G_Leaf_SW-6", "100G_Leaf_SW-6 (PiAMRDC-100G-LFSW-06)", "172.20.96.36", ARISTA, "leaf", "arista", True),
     ("100G_Leaf_SW-7-8", "100G-Leaf_SW-7&8 (100G-LF-7&8)", "172.20.97.212", COMWARE, "leaf", "hpe", True),
@@ -61,7 +62,8 @@ HEALTH = {
                "fan_ok": 1, "psu_ok": 1, "absent": 5},   # CISCO-ENVMON 5 = notPresent (empty slot): not a fault
     COMWARE: {"cpu": "max(last_foreach(//system.cpu.util[*]))", "mem": "max(last_foreach(//vm.memory.util[*]))",
               "fan_ok": 2, "psu_ok": 2},
-    # hwEntityFanState 1 = normal; S5720-LI reports no PSU table (count stays 0)
+    # hwEntityFanState 1 = normal, hwEntityPwrState 1 = supply (add_huawei_psu); S5720-LI reports no PSU table
+    # (count stays 0)
     HUAWEI: {"cpu": "max(last_foreach(//system.cpu.util[*]))", "mem": "max(last_foreach(//vm.memory.util[*]))",
              "fan_ok": 1, "psu_ok": 1},
 }
@@ -132,6 +134,54 @@ def setup_huawei(z):
     setup_snmp_get_template(z, HUAWEI_SRC, HUAWEI, (
         "PIDC copy of 'Huawei VRP by SNMP' for S5720: traffic 10s, status 30s, errors 1m, Admin status + Port state. "
         "Managed by /opt/isp/zabbix/add_vmware_fabric.py / add_cross_connect_fabrics.py."))
+    add_huawei_psu(z, template_id(z, HUAWEI))
+
+
+# hwPwrStatusTable (HUAWEI-ENTITY-EXTENT-MIB), index <stack member>.<power id>; column 6 = hwEntityPwrState.
+# It also lists empty PSU slots (as notSupply), so discovery keeps a row only when ENTITY-MIB names the PSU:
+# "POWER Card <member>/PWR<n>", n = rank of the power id within the member (S6720: ids 5, 6 -> PWR1, PWR2).
+# If the switch names no PSUs at all, every row is kept.
+HUAWEI_PWR_STATE, ENT_NAME = "1.3.6.1.4.1.2011.5.25.31.1.1.18.1.6", "1.3.6.1.2.1.47.1.1.1.1.7"
+HUAWEI_PSU_JS = r"""
+var rows = {}, named = {}, anyNamed = false, out = [];
+value.split('\n').forEach(function (line) {
+    var m = line.match(/^\.?1\.3\.6\.1\.4\.1\.2011\.5\.25\.31\.1\.1\.18\.1\.6\.(\d+)\.(\d+) = /);
+    if (m) { (rows[m[1]] = rows[m[1]] || []).push(parseInt(m[2], 10)); return; }
+    m = line.match(/^\.?1\.3\.6\.1\.2\.1\.47\.1\.1\.1\.1\.7\.\d+ = STRING: "(?:.*\D)?(\d+)\/PWR(\d+)"/);
+    if (m) { named[m[1] + '/' + m[2]] = true; anyNamed = true; }
+});
+Object.keys(rows).forEach(function (slot) {
+    rows[slot].sort(function (a, b) { return a - b; }).forEach(function (id, i) {
+        if (!anyNamed || named[slot + '/' + (i + 1)])
+            out.push({'{#SNMPINDEX}': slot + '.' + id, '{#PSU_NAME}': 'PSU ' + slot + '/PWR' + (i + 1)});
+    });
+});
+return JSON.stringify(out);
+"""
+
+
+def add_huawei_psu(z, tid):
+    """Power supply status for Huawei VRP switches with hwPwrStatusTable (e.g. S6720); none on S5720-LI."""
+    R = add_routers
+    master = R.ensure_item(z, tid, "sensor.psu.walk", name="Huawei VRP: SNMP walk power supply status", type=R.SNMP,
+                           snmp_oid=R.walk(HUAWEI_PWR_STATE, ENT_NAME), delay="1m", value_type=R.TEXT, history="0",
+                           trends="0", tags=[{"tag": "component", "value": "raw"}])
+    vm = R.valuemap(z, tid, "HUAWEI-ENTITY-EXTENT-MIB::hwEntityPwrState",
+                    [(1, "supply"), (2, "notSupply"), (3, "sleep"), (4, "unknown")])
+    # lost PSUs stay enabled for 7 days, so a pulled PSU (its entity vanishes) still alerts instead of going quiet
+    rule = R.ensure_rule(z, tid, "sensor.psu.discovery", name="Power supply discovery", type=R.DEPENDENT,
+                         master_itemid=master, lifetime="7d", enabled_lifetime_type=1,
+                         preprocessing=R.pp((R.JAVASCRIPT, HUAWEI_PSU_JS.strip()),
+                                            (base.DISCARD_UNCHANGED_HEARTBEAT, "1h")))
+    key = "sensor.psu.status[hwEntityPwrState.{#SNMPINDEX}]"
+    R.ensure_proto(z, tid, rule, key, name="{#PSU_NAME}: Power supply status", type=R.DEPENDENT,
+                   master_itemid=master, value_type=R.UINT, valuemapid=vm, history="90d", trends="0",
+                   tags=[{"tag": "component", "value": "power"}],
+                   preprocessing=R.pp((R.SNMP_WALK_VALUE, f"{HUAWEI_PWR_STATE}.{{#SNMPINDEX}}\n0"),
+                                      (base.DISCARD_UNCHANGED_HEARTBEAT, "1h")))
+    R.ensure_trigger(z, rule, "{#PSU_NAME}: power supply is not supplying power", priority=3,
+                     expression=f"last(/{HUAWEI}/{key})<>1", tags=[{"tag": "scope", "value": "availability"}],
+                     comments="hwEntityPwrState is not 'supply': no input power, failed, or removed.")
 
 
 def setup_catalyst(z):
@@ -141,11 +191,37 @@ def setup_catalyst(z):
     add_routers.tune_interfaces(z, template_id(z, CATALYST))
 
 
+def sync_host(z, hostid, name, template, vendor, enabled):
+    """Bring an existing host in line with SWITCHES (e.g. a switch added disabled with ICMP only that is now
+    reachable): visible name, template (others cleared - vendor templates carry their own ICMP items), vendor tag,
+    enabled state."""
+    h = z.call("host.get", {"hostids": hostid, "output": ["name", "status", "description"],
+                            "selectParentTemplates": ["templateid", "name"], "selectTags": ["tag", "value"]})[0]
+    update = {}
+    if h["name"] != name:
+        update["name"] = name
+    if [t["name"] for t in h["parentTemplates"]] != [template]:
+        update["templates"] = [{"templateid": template_id(z, template)}]
+        update["templates_clear"] = [{"templateid": t["templateid"]} for t in h["parentTemplates"]
+                                     if t["name"] != template]
+    tags = [t if t["tag"] != "vendor" else {"tag": "vendor", "value": vendor} for t in h["tags"]]
+    if tags != h["tags"]:
+        update["tags"] = tags
+    if h["status"] != ("0" if enabled else "1"):
+        update["status"] = 0 if enabled else 1
+        if enabled and h["description"].startswith("Not reachable"):
+            update["description"] = ""
+    if update:
+        z.call("host.update", {"hostid": hostid, **update})
+        print(f"{h['name']}: updated {sorted(update)}")
+
+
 def main():
     z = base.Zabbix()
     community = base.read(COMMUNITY_FILE)
     setup_comware(z)
     setup_catalyst(z)
+    setup_huawei(z)
     for template in HEALTH:
         health_items(z, template)
     found = z.call("hostgroup.get", {"filter": {"name": [GROUP]}, "output": ["groupid"]})
@@ -158,6 +234,7 @@ def main():
             z.call("hostinterface.update", {"interfaceid": existing[0]["interfaces"][0]["interfaceid"], "ip": ip})
             print(f"{host}: IP -> {ip}")
         if existing:
+            sync_host(z, existing[0]["hostid"], name, template, vendor, enabled)
             add_switches.ensure_macros(z, existing[0]["hostid"])
             ifname = z.call("usermacro.get", {"hostids": existing[0]["hostid"], "output": ["hostmacroid", "value"],
                                               "filter": {"macro": "{$NET.IF.IFNAME.NOT_MATCHES}"}})

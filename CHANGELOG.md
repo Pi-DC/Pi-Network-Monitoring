@@ -17,7 +17,13 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
 
 ### Devices added
 - **Pi VMware Fabric**: 100G spines 1/2 (Arista 7280CR-48), leaves 1/2 (Arista 7050SX3), 5/6 (Arista 7150S-24),
-  leaf 7&8 (HPE 5820AF IRF). Leaf 3&4 (172.20.96.16) added disabled - not reachable by ping/SNMP.
+  leaf 7&8 (HPE 5820AF IRF). Leaf 3&4 (172.20.96.16) added disabled - not reachable by ping/SNMP; later the
+  same day it answered and is now monitored: Huawei S6720S-26Q-EI-24S-AC 2-member iStack on
+  *Huawei VRP by SNMP - PIDC*. `add_vmware_fabric.py` now also brings existing hosts in line with its switch list
+  (name, template, vendor tag, enabled).
+- *Huawei VRP by SNMP - PIDC*: power supply monitoring (hwPwrStatusTable): discovers only PSUs the switch names
+  as installed (empty slots, which report "notSupply", are skipped), status per PSU, alert when not supplying
+  power; feeds "Health: Power supplies not OK". S5720-LI has no such table (nothing discovered).
 - **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
 - **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
 - **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).
