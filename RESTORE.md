@@ -1,107 +1,105 @@
 # Restore guide
 
-Three situations, from small to large. All need **root** on the server.
+Configuration comes from this git repository; data (database, graph history, SmokePing, secrets) from the
+encrypted nightly backups on NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`;
+14 nights) or the local copy `/var/backups/pi-network-monitoring` (3 nights). All commands as **root**.
+
+You always need the **backup passphrase** (kept outside the server; on a working server it is
+`/root/.credentials/backup_passphrase`).
 
 | Situation | What to do | Graph history |
 |---|---|---|
-| A. A file or script was changed by mistake | [Restore single files](#a-restore-single-files-from-git) from `main` | kept |
-| B. Zabbix configuration damaged (hosts, dashboards, alert rules deleted) but the server is fine | [Restore the database](#b-restore-the-zabbix-database-on-the-same-server) | from the local full backup: kept; from GitHub: lost |
-| C. Server lost / rebuilt | [Full restore](#c-full-restore-on-a-new-server) on a fresh Ubuntu 24.04 VM | only if a local backup folder survived |
+| A. A script or config file was changed by mistake | [Restore files from git](#a-restore-files-from-git) | kept |
+| B. Zabbix configuration damaged (hosts, dashboards, alert rules deleted), server fine | [Restore the database](#b-restore-the-database-on-the-same-server) | back to the backup night |
+| C. Server lost or rebuilt | [Full restore](#c-full-restore-on-a-new-server) on a fresh Ubuntu 24.04 VM | back to the backup night |
 
-You always need the **backup passphrase** (kept outside the server; on a working server it is in
-`/root/.credentials/backup_passphrase`).
+Backup folders (newest first): `ls -1r /mnt/pi-netmon-nfs/ | head` - each has `MANIFEST.json`; `LATEST.txt` names the newest.
+
+| File in a backup folder | Contents |
+|---|---|
+| `zabbix-full.sql.zst.gpg` | Whole Zabbix database incl. graph history |
+| `zabbix-config.sql.zst.gpg` | Configuration only (hosts, templates, items, triggers, dashboards, users, alerts, reports) - small |
+| `smokeping-data.tar.zst.gpg` | SmokePing RRD data (`/var/lib/smokeping`) |
+| `secrets.tar.zst.gpg` | `/root/.credentials`, `/etc/letsencrypt` (TLS keys), original `zabbix_server.conf` / `zabbix.conf.php`, SmokePing logins |
+
+Helper used below (decrypt + decompress to stdout):
+```bash
+dec() { gpg --batch --quiet --pinentry-mode loopback --passphrase-file /root/.credentials/backup_passphrase -d "$1" | zstd -q -d -c; }
+```
 
 ---
 
-## A. Restore single files from git
+## A. Restore files from git
 
 ```bash
-cd /var/lib/pi-netmon-backup/repo && git fetch origin
-git log --oneline -- deploy/opt/isp/zabbix/build_fabric_dashboard.py      # pick a version
+cd /var/lib/pi-netmon-backup/repo && git fetch -q origin
+git log --oneline -- deploy/opt/isp/zabbix/build_fabric_dashboard.py           # pick a version
 git show <commit>:deploy/opt/isp/zabbix/build_fabric_dashboard.py > /opt/isp/zabbix/build_fabric_dashboard.py
 ```
-Files containing passwords (`zabbix_server.conf`, `zabbix.conf.php`) are redacted in git - take those from the
-secrets bundle (section B, step 2) or edit only the lines you need.
+Files with passwords (`zabbix_server.conf`, `zabbix.conf.php`) are redacted in git: take those from the secrets
+bundle, e.g. `dec /mnt/pi-netmon-nfs/<date>/secrets.tar.zst.gpg | tar -xpf - -C / etc/zabbix/zabbix_server.conf`.
 
 ---
 
-## B. Restore the Zabbix database on the same server
+## B. Restore the database on the same server
 
-1. **Pick the backup.** Local (has graph history): `ls /var/backups/pi-network-monitoring/` (last 14 nights).
-   GitHub (configuration only): branch `backups`.
-2. **Get the files** (GitHub case):
-   ```bash
-   cd /var/lib/pi-netmon-backup/repo && git fetch origin backups
-   git show origin/backups:zabbix-config.sql.zst.gpg > /var/tmp/zabbix-config.sql.zst.gpg
-   gpg --batch --pinentry-mode loopback --passphrase-file /root/.credentials/backup_passphrase \
-       --decrypt -o /var/tmp/zabbix-config.sql.zst /var/tmp/zabbix-config.sql.zst.gpg
-   ```
-   (Secrets bundle the same way: `secrets.tar.zst.gpg` → `tar -I zstd -tvf` to list, `-xpf ... -C /` to restore.)
-3. **Stop Zabbix and replace the database** (MariaDB and Zabbix are restarted in separate commands):
-   ```bash
-   systemctl stop zabbix-server
-   mysql -e "DROP DATABASE zabbix; CREATE DATABASE zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
-   # either the local full backup (with history):
-   zstd -d -c /var/backups/pi-network-monitoring/<date>/zabbix-full.sql.zst | mysql zabbix
-   # or the GitHub configuration backup (no history):
-   zstd -d -c /var/tmp/zabbix-config.sql.zst | mysql zabbix
-   systemctl start zabbix-server
-   ```
-4. Check https://isp.picloud.in/zabbix (dashboards, hosts), then `rm /var/tmp/zabbix-config.sql*`.
+```bash
+B=/mnt/pi-netmon-nfs/$(cat /mnt/pi-netmon-nfs/LATEST.txt)     # or another night's folder
+systemctl stop zabbix-server
+mysql -e "DROP DATABASE zabbix; CREATE DATABASE zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
+dec $B/zabbix-full.sql.zst.gpg | mysql zabbix                   # with graph history
+#   or: dec $B/zabbix-config.sql.zst.gpg | mysql zabbix          # configuration only, much faster
+systemctl start zabbix-server                                   # MariaDB and Zabbix: restart separately, never together
+```
+Then check https://isp.picloud.in/zabbix. SmokePing data, if needed:
+`systemctl stop smokeping && dec $B/smokeping-data.tar.zst.gpg | tar -C /var/lib -xpf - && systemctl start smokeping`.
 
 ---
 
 ## C. Full restore on a new server
 
-Needs: a fresh **Ubuntu 24.04** VM (24 GB RAM, 8 vCPU, 500 GB disk like the original), internet access to
-GitHub, repo.zabbix.com and dl.google.com, and the backup passphrase.
+Needs: fresh **Ubuntu 24.04** VM (24 GB RAM, 8 vCPU, 500 GB disk), access to GitHub, repo.zabbix.com,
+dl.google.com and the NFS server 172.16.95.5, and the backup passphrase.
 
-1. **GitHub access for the new server**
+1. **GitHub access**
    ```bash
    ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
-   cat /root/.ssh/id_ed25519.pub        # add as a deploy key (write access) on Pi-DC/Pi-Network-Monitoring
+   cat /root/.ssh/id_ed25519.pub     # add as a deploy key with write access on Pi-DC/Pi-Network-Monitoring
    printf 'Host github.com\n    Hostname ssh.github.com\n    Port 443\n    User git\n' > /root/.ssh/config
    ```
-2. **Clone and run the restore**
+2. **Clone and restore**
    ```bash
    apt-get update && apt-get install -y git
    git clone git@github.com:Pi-DC/Pi-Network-Monitoring.git /var/lib/pi-netmon-backup/repo
-   install -m 600 /dev/null /root/backup_passphrase && nano /root/backup_passphrase     # paste the passphrase
+   install -m 600 /dev/null /root/backup_passphrase && nano /root/backup_passphrase    # paste the passphrase
    /var/lib/pi-netmon-backup/repo/restore.sh --passphrase-file /root/backup_passphrase
    ```
-   If a nightly folder from the old server's `/var/backups/pi-network-monitoring/` survived (VM snapshot,
-   copy), copy it over and add `--local-backup /path/to/<date>` to get the graph history and SmokePing data back.
+   Options: `--backup-dir /mnt/pi-netmon-nfs/<date>` for an older night; `--config-only` to skip graph history.
 
-   `restore.sh` does: installs Zabbix 7.0 / MariaDB / Apache+PHP / SmokePing / Chrome / tools → puts every
-   configuration file and script back (real passwords from the encrypted bundle, owners and modes as before) →
-   MariaDB tuning, `zabbix` database and user → imports the database → SmokePing data (if given) → enables the
-   Apache modules / sites → starts all services and prints their state.
+   `restore.sh`: mounts the NFS share (fstab automount) and checks the backup's checksums → installs Zabbix 7.0,
+   MariaDB, Apache + PHP, SmokePing, Chrome and tools → puts every script and config file back (real passwords from
+   the secrets bundle, owners and modes as recorded) → MariaDB tuning, `zabbix` database and user → imports the
+   database → SmokePing data → Apache modules / sites → starts everything and prints the service states.
 3. **After the restore**
-   - Same IP (172.20.119.99) is easiest. Otherwise point `isp.picloud.in` (internal DNS) at the new IP, and
-     allow SNMP from the new IP on every device (A10, routers, switches have SNMP ACLs).
-   - Open https://isp.picloud.in/zabbix (Admin account as before), /reports and /smokeping.
-   - Within ~2 minutes data arrives again (Monitoring → Latest data); the 15-minute queue should be empty.
-   - The TLS certificate comes back from the bundle; renewal works as before (acme-dns).
-   - `rm /root/backup_passphrase` (the passphrase now lives in `/root/.credentials/backup_passphrase`).
-   - Run one backup by hand: `/opt/isp/backup/backup.py` (the 21:00 cron job is restored too).
+   - Same IP (172.20.119.99) is easiest. Otherwise point `isp.picloud.in` (internal DNS) at the new IP and allow
+     SNMP from it on every device (A10, routers and switches have SNMP ACLs).
+   - Open https://isp.picloud.in/zabbix (same accounts), /reports, /smokeping. Data arrives within ~2 minutes.
+   - The TLS certificate comes from the bundle; renewal works as before.
+   - `rm /root/backup_passphrase` (it is now in `/root/.credentials/backup_passphrase`).
+   - Run one backup by hand: `/opt/isp/backup/backup.py`.
 
 ---
 
-## Checking that backups work
+## Checking the backups
 
-- Last result: `cat /var/lib/pi-netmon-backup/status/last-result` (also in Zabbix: host *Zabbix server*,
-  item *Backup: last result*; e-mail alert if a backup fails or none succeeded for 26 h).
-- Log: `/var/log/pi-netmon-backup.log`
-- GitHub: branch `backups` → `MANIFEST.json` shows the time of the last successful backup.
-- Test that a backup opens (no changes to the system):
+- Last result: `cat /var/lib/pi-netmon-backup/status/last-result` (also Zabbix → host *Zabbix server* →
+  *Backup: last result*; e-mail if a backup fails or none succeeded for 26 h). Log: `/var/log/pi-netmon-backup.log`.
+- Test that a backup opens, without changing anything:
   ```bash
-  cd /var/lib/pi-netmon-backup/repo && git fetch -q origin backups
-  git show origin/backups:zabbix-config.sql.zst.gpg | gpg --batch --pinentry-mode loopback \
-    --passphrase-file /root/.credentials/backup_passphrase -d | zstd -d | tail -1      # "-- Dump completed ..."
+  B=/mnt/pi-netmon-nfs/$(cat /mnt/pi-netmon-nfs/LATEST.txt); dec $B/zabbix-config.sql.zst.gpg | tail -1   # "-- Dump completed ..."
   ```
 
 ## Changing the passphrase
 
-Write the new one to `/root/.credentials/backup_passphrase` (mode 600), run `/opt/isp/backup/backup.py`, store the
-new passphrase outside the server. The `backups` branch only ever holds the latest backup, so the old passphrase
-is no longer needed after that run.
+Write the new one to `/root/.credentials/backup_passphrase` (mode 600) and store it outside the server. Backups made
+before keep the old passphrase - keep the old one until those have rotated out (14 nights).

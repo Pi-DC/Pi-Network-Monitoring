@@ -25,6 +25,7 @@
 700 root root /opt/isp/ssl/issue-letsencrypt.sh
 700 root root /opt/isp/ssl/manual-auth-hook.sh
 700 root root /opt/isp/ssl/manual-cleanup-hook.sh
+644 root root /opt/isp/backup/CHANGELOG.md
 644 root root /opt/isp/backup/README.md
 644 root root /opt/isp/backup/RESTORE.md
 700 root root /opt/isp/backup/backup.py

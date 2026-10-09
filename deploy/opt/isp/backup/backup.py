@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""Nightly backup of the Pi Network Monitoring tool (isp.picloud.in) to GitHub + local disk.
+"""Nightly backup of the Pi Network Monitoring tool (isp.picloud.in).
 
-Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST. Steps (any failure stops the run; GitHub is then left as it was):
+Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
 
- 1. Deployment tree (all scripts and configuration, see FILES) is copied into the git checkout under deploy/,
-    every known secret value replaced by __REDACTED__, and a scan proves no secret is left in plain text.
- 2. Secrets bundle (credentials, DB/SMTP passwords, SNMP communities, TLS keys, SmokePing logins, original
-    config files) -> tar -> zstd -> gpg AES-256 with the passphrase in /root/.credentials/backup_passphrase.
- 3. Zabbix configuration database (everything except metric history/trends and the audit log) -> mysqldump ->
-    zstd -> gpg. This holds every host, template, item, trigger, dashboard, user, alert rule and report.
- 4. Each encrypted file is decrypted again and checked (zstd integrity, dump completed) before anything is pushed.
- 5. GitHub: branch "main" gets a commit when the deployment tree changed; branch "backups" is replaced by a single
-    commit holding only this run's encrypted files (only the last successful backup is kept, as requested).
- 6. Local (not in git, too large): full database dump incl. metric history + SmokePing RRD data, kept 14 days in
-    /var/backups/pi-network-monitoring.
- 7. Status for Zabbix: /var/lib/pi-netmon-backup/status/last-result ("OK ..." or "FAILED ...") and last-success.
+  GitHub  git@github.com:Pi-DC/Pi-Network-Monitoring.git, branch main - configuration and documentation only:
+          every script and config file under deploy/ (secret values replaced by __REDACTED__; a scan stops the push
+          if any secret is left in plain text), package / Apache / ownership lists, README, RESTORE, CHANGELOG and a
+          generated docs/INVENTORY.md (devices, dashboards, alerting, scheduled jobs). Commit only when changed.
+  NFS     172.16.95.5:/Repo_BDR/Pi-Network-Monitoring, mounted on /mnt/pi-netmon-nfs (automount, /etc/fstab):
+          one folder per night, all files gpg AES-256 encrypted (the export is readable by any host):
+            zabbix-full.sql.zst.gpg      whole Zabbix database incl. graph history
+            zabbix-config.sql.zst.gpg    configuration only (no history) - small, quick to restore
+            smokeping-data.tar.zst.gpg   SmokePing RRD data
+            secrets.tar.zst.gpg          credentials, TLS keys, original config files with passwords
+            MANIFEST.json                time, sizes, SHA-256, matching git commit
+          Written as <name>.partial, renamed only after every file was copied and its checksum re-read.
+          LATEST.txt names the newest complete backup. Kept KEEP_NFS_DAYS nights.
+  Local   /var/backups/pi-network-monitoring: the same folder, last KEEP_LOCAL_DAYS nights (fast restore).
 
-Restore: see RESTORE.md in the repository (restore.sh). Check run without pushing: backup.py --no-push
+Every encrypted file is decrypted again and checked before it is copied anywhere. Any failure stops the run and
+leaves the previous backups untouched; /var/lib/pi-netmon-backup/status/last-result ("OK ..." / "FAILED ...")
+is read by Zabbix, which e-mails on failure or when no backup succeeded for 26 hours.
+Passphrase: /root/.credentials/backup_passphrase (never in git; keep a copy outside the server).
+
+Restore: RESTORE.md / restore.sh in the repository. Check run (nothing pushed or copied): backup.py --no-push
 """
 import datetime
 import glob
@@ -37,12 +44,17 @@ REPO_URL = "git@github.com:Pi-DC/Pi-Network-Monitoring.git"
 WORK = "/var/lib/pi-netmon-backup"
 CHECKOUT = f"{WORK}/repo"
 STATUS = f"{WORK}/status"
+NFS = "/mnt/pi-netmon-nfs"
+NFS_SOURCE = "172.16.95.5:/Repo_BDR/Pi-Network-Monitoring"
 LOCAL = "/var/backups/pi-network-monitoring"
-KEEP_LOCAL_DAYS = 14
+KEEP_NFS_DAYS = 14
+KEEP_LOCAL_DAYS = 3
 PASSPHRASE = "/root/.credentials/backup_passphrase"
 DB = "zabbix"
 NO_DATA_TABLES = ["history", "history_uint", "history_str", "history_text", "history_log", "history_bin",
-                  "trends", "trends_uint", "auditlog"]   # schema only in the GitHub dump (data is far too large)
+                  "trends", "trends_uint", "auditlog"]   # schema only in the configuration dump
+DUMP = ["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers", "--hex-blob",
+        "--no-tablespaces", "--default-character-set=utf8mb4"]
 
 # Deployment files (plain text in git after redaction). Globs; directories are copied recursively.
 FILES = [
@@ -67,10 +79,11 @@ FILES = [
     "/etc/apt/sources.list.d/google-chrome.sources",
 ]
 SKIP = re.compile(r"(__pycache__|\.pyc$|\.bak|\.orig$|~$)")
+ROOT_DOCS = ("README.md", "RESTORE.md", "CHANGELOG.md", "restore.sh")   # also copied to the top of the repo
 # Secrets bundle (encrypted). Directories recursively.
 SECRETS = ["/root/.credentials", "/etc/letsencrypt", "/etc/zabbix/zabbix_server.conf", "/etc/zabbix/web/zabbix.conf.php",
            "/etc/smokeping/smokeping_secrets", "/etc/smokeping/htpasswd"]
-PACKAGES = r"^(zabbix|mariadb|apache2|libapache2-mod-php|php8|smokeping|fping|snmp|google-chrome|poppler-utils|certbot|zstd|gpg)"
+PACKAGES = r"^(zabbix|mariadb|apache2|libapache2-mod-php|php8|smokeping|fping|snmp|google-chrome|poppler-utils|certbot|zstd|gpg|nfs-common)"
 
 
 def log(msg):
@@ -87,14 +100,49 @@ def git(*args, capture=False):
     return r.stdout.strip() if capture else None
 
 
-def gpg_encrypt(src, dst):
-    run(["gpg", "--batch", "--yes", "--quiet", "--pinentry-mode", "loopback", "--passphrase-file", PASSPHRASE,
-         "--symmetric", "--cipher-algo", "AES256", "--compress-algo", "none", "-o", dst, src])
+GPG = ["gpg", "--batch", "--yes", "--quiet", "--pinentry-mode", "loopback", "--passphrase-file", PASSPHRASE]
 
 
-def gpg_decrypt(src, dst):
-    run(["gpg", "--batch", "--yes", "--quiet", "--pinentry-mode", "loopback", "--passphrase-file", PASSPHRASE,
-         "--decrypt", "-o", dst, src])
+def encrypt_stream(producer, dst, level=10):
+    """producer (argv list or file path) | zstd | gpg AES-256 -> dst."""
+    with open(dst, "wb") as out:
+        src = subprocess.Popen(producer, stdout=subprocess.PIPE) if isinstance(producer, list) else None
+        zs = subprocess.Popen(["zstd", "-q", f"-{level}", "-T0"] + ([] if src else ["-c", producer]),
+                              stdin=src.stdout if src else None, stdout=subprocess.PIPE)
+        if src:
+            src.stdout.close()
+        gp = subprocess.Popen(GPG + ["--symmetric", "--cipher-algo", "AES256", "--compress-algo", "none"],
+                              stdin=zs.stdout, stdout=out)
+        zs.stdout.close()
+        if gp.wait() or zs.wait() or (src and src.wait()):
+            raise RuntimeError(f"creating {os.path.basename(dst)} failed")
+
+
+def verify(enc, kind):
+    """Decrypt + decompress again: the stream must be intact; dumps must have completed; bundles must list."""
+    gp = subprocess.Popen(GPG + ["--decrypt", enc], stdout=subprocess.PIPE)
+    zs = subprocess.Popen(["zstd", "-q", "-d", "-c"], stdin=gp.stdout, stdout=subprocess.PIPE)
+    gp.stdout.close()
+    if kind == "sql":
+        tail, size = b"", 0
+        for chunk in iter(lambda: zs.stdout.read(1 << 20), b""):
+            size += len(chunk)
+            tail = (tail + chunk)[-400:]
+        ok = b"Dump completed" in tail and size > 1_000_000
+    else:
+        names = run(["tar", "-tf", "-"], stdin=zs.stdout, capture_output=True, text=True).stdout.split("\n")
+        ok = len(names) > 1 and (kind != "secrets" or any(n.endswith(".credentials/zabbix_db") for n in names))
+    zs.stdout.close()
+    if zs.wait() or gp.wait() or not ok:
+        raise RuntimeError(f"verification of {os.path.basename(enc)} failed")
+
+
+def sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
 
 
 def secret_values():
@@ -132,8 +180,7 @@ def copy_deploy(secrets):
                 paths += [os.path.join(d, f) for d, _, fs in os.walk(p) for f in fs]
             else:
                 paths.append(p)
-    count = 0
-    owners = []
+    count, owners = 0, []
     for p in paths:
         if SKIP.search(p) or not os.path.isfile(p):
             continue
@@ -148,78 +195,78 @@ def copy_deploy(secrets):
         open(out, "wb").write(data)
         shutil.copymode(p, out)
         count += 1
-    os.makedirs(f"{CHECKOUT}/packages", exist_ok=True)
-    open(f"{CHECKOUT}/packages/ownership.txt", "w").write("\n".join(owners) + "\n")   # git keeps no owners
-    # package versions + apt keys needed for the repos
+    pkg = f"{CHECKOUT}/packages"
+    os.makedirs(pkg, exist_ok=True)
+    open(f"{pkg}/ownership.txt", "w").write("\n".join(owners) + "\n")   # git keeps no owners
     pk = run(["dpkg-query", "-W", "-f", "${Package}=${Version}\n"], capture_output=True, text=True).stdout
-    os.makedirs(f"{CHECKOUT}/packages", exist_ok=True)
-    open(f"{CHECKOUT}/packages/packages.txt", "w").write(
-        "".join(l + "\n" for l in pk.splitlines() if re.match(PACKAGES, l)))
+    open(f"{pkg}/packages.txt", "w").write("".join(l + "\n" for l in pk.splitlines() if re.match(PACKAGES, l)))
     tz = run(["timedatectl", "show", "-p", "Timezone", "--value"], capture_output=True, text=True).stdout.strip()
-    open(f"{CHECKOUT}/packages/timezone.txt", "w").write(tz + "\n")
-    with open(f"{CHECKOUT}/packages/apache-enabled.txt", "w") as out:   # for a2enmod / a2enconf / a2ensite
+    open(f"{pkg}/timezone.txt", "w").write(tz + "\n")
+    with open(f"{pkg}/apache-enabled.txt", "w") as out:   # for a2enmod / a2enconf / a2ensite
         for kind, pat in (("mod", "mods-enabled/*.load"), ("conf", "conf-enabled/*.conf"), ("site", "sites-enabled/*.conf")):
             for f in sorted(glob.glob(f"/etc/apache2/{pat}")):
                 out.write(f"{kind} {os.path.basename(f).rsplit('.', 1)[0]}\n")
-    for f in ("README.md", "RESTORE.md", "restore.sh"):   # restore guide at the top of the repository
+    for f in ROOT_DOCS:
         if os.path.exists(f"/opt/isp/backup/{f}"):
             shutil.copy2(f"/opt/isp/backup/{f}", f"{CHECKOUT}/{f}")
     return count
 
 
+def write_inventory():
+    """docs/INVENTORY.md from the Zabbix API: only configuration (no live values), so it changes only with config."""
+    sys.path.insert(0, "/opt/isp/zabbix")
+    import setup_isp_links as base
+    z = base.Zabbix()
+    tag = lambda h, t: next((x["value"] for x in h["tags"] if x["tag"] == t), "")
+    hosts = z.call("host.get", {"output": ["host", "name", "status"], "selectGroups": ["name"], "selectTags": ["tag", "value"],
+                                "selectParentTemplates": ["host"], "selectInterfaces": ["ip", "type"]})
+    out = ["# Inventory", "", "Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by hand.", "",
+           f"## Monitored devices ({sum(h['status'] == '0' for h in hosts)} enabled, {len(hosts)} total)", "",
+           "| Group | Host | Name | IP | Model / vendor | Template | Status |", "|---|---|---|---|---|---|---|"]
+    for h in sorted(hosts, key=lambda h: (h["groups"][0]["name"], h["host"].replace("-", "_"))):
+        ip = next((i["ip"] for i in h["interfaces"]), "")
+        model = tag(h, "model") or tag(h, "vendor")
+        tpl = ", ".join(t["host"] for t in h["parentTemplates"])
+        out.append(f"| {h['groups'][0]['name']} | {h['host']} | {h['name']} | {ip} | {model} | {tpl} | "
+                   f"{'enabled' if h['status'] == '0' else '**disabled**'} |")
+    reports = {r["dashboardid"] for r in z.call("report.get", {"output": ["dashboardid"]})}
+    out += ["", "## Dashboards", "", "| ID | Name | Pages | Daily 08:00 PDF e-mail |", "|---|---|---|---|"]
+    for d in z.call("dashboard.get", {"output": ["dashboardid", "name"], "selectPages": ["name"], "sortfield": "dashboardid"}):
+        out.append(f"| {d['dashboardid']} | {d['name']} | {len(d['pages'])} | {'yes' if d['dashboardid'] in reports else 'no'} |")
+    out += ["", "## E-mail alerting", ""]
+    for a in z.call("action.get", {"output": ["name", "status"], "selectFilter": "extend", "filter": {"eventsource": 0}}):
+        if a["status"] != "0":
+            continue
+        gm = {g["groupid"]: g["name"] for g in z.call("hostgroup.get", {"output": ["groupid", "name"]})}
+        hm = {x["hostid"]: x["host"] for x in z.call("host.get", {"output": ["hostid", "host"]})}
+        scope = [gm.get(c["value"]) or hm.get(c["value"]) for c in a["filter"]["conditions"] if c["conditiontype"] in ("0", "1")]
+        if scope:
+            out.append(f"- **{a['name']}**: severity Average and above on {', '.join(sorted(filter(None, scope)))}")
+    out += ["", "Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-device exceptions are host macros.",
+            "", "## Scheduled jobs (`/etc/cron.d`)", ""]
+    for f in sorted(glob.glob("/etc/cron.d/zabbix-*") + ["/etc/cron.d/pi-netmon-backup"]):
+        for line in open(f):
+            if line.strip() and not line.startswith("#"):
+                out.append(f"- `{os.path.basename(f)}`: `{line.strip()}`")
+    out += ["", "## Backups", "",
+            f"- Configuration and documentation: this repository (branch `main`).",
+            f"- Data: NFS `{NFS_SOURCE}` (mounted on `{NFS}`), one encrypted folder per night, {KEEP_NFS_DAYS} nights kept.",
+            f"- Local copy: `{LOCAL}`, {KEEP_LOCAL_DAYS} nights.", ""]
+    os.makedirs(f"{CHECKOUT}/docs", exist_ok=True)
+    open(f"{CHECKOUT}/docs/INVENTORY.md", "w").write("\n".join(out))
+
+
 def scan_for_secrets(secrets):
-    """Abort if any secret value is in a plain-text file that would be pushed."""
+    """Abort if any secret value is in a file that would be pushed."""
     for d, _, fs in os.walk(CHECKOUT):
         if "/.git" in d:
             continue
         for f in fs:
-            p = os.path.join(d, f)
-            if p.endswith(".gpg"):
-                continue
-            data = open(p, "rb").read()
+            data = open(os.path.join(d, f), "rb").read()
             for s in secrets:
                 if s.encode() in data:
-                    raise RuntimeError(f"secret value found in plain text in {p[len(CHECKOUT) + 1:]} - push aborted")
-
-
-def dump_config_db(path):
-    ign = [f"--ignore-table={DB}.{t}" for t in NO_DATA_TABLES]
-    base = ["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers", "--hex-blob",
-            "--no-tablespaces", "--default-character-set=utf8mb4"]
-    with open(path, "wb") as out:
-        run(base + ign + [DB], stdout=out)
-        run(base + ["--no-data", DB] + NO_DATA_TABLES, stdout=out)
-
-
-def zstd(src, dst, level=10):
-    run(["zstd", "-q", "-f", f"-{level}", "-T0", src, "-o", dst])
-
-
-def verify(enc, kind, tmp):
-    """Decrypt + decompress the encrypted file again and check it is complete."""
-    dec = f"{tmp}/verify.zst"
-    gpg_decrypt(enc, dec)
-    run(["zstd", "-q", "-t", dec])
-    raw = f"{tmp}/verify.raw"
-    run(["zstd", "-q", "-d", "-f", dec, "-o", raw])
-    if kind == "sql":
-        tail = open(raw, "rb").read()[-400:]
-        if b"Dump completed" not in tail or os.path.getsize(raw) < 1_000_000:
-            raise RuntimeError("database dump incomplete")
-    else:
-        with tarfile.open(raw) as t:
-            if not any(n.endswith(".credentials/zabbix_db") for n in t.getnames()):
-                raise RuntimeError("secrets bundle incomplete")
-    os.remove(dec)
-    os.remove(raw)
-
-
-def sha256(p):
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
+                    raise RuntimeError(f"secret value found in plain text in {os.path.join(d, f)[len(CHECKOUT) + 1:]}"
+                                       " - push aborted")
 
 
 def ensure_checkout():
@@ -228,35 +275,41 @@ def ensure_checkout():
         run(["git", "clone", "-q", REPO_URL, CHECKOUT])
     git("config", "user.name", "Pi Network Monitoring backup (isp.picloud.in)")
     git("config", "user.email", "backup@isp.picloud.in")
-    git("fetch", "-q", "origin")
-    remote_main = run(["git", "-C", CHECKOUT, "rev-parse", "-q", "--verify", "origin/main"],
-                      capture_output=True, check=False).returncode == 0
-    if remote_main:
-        git("checkout", "-q", "-B", "main", "origin/main")
-    else:
-        git("checkout", "-q", "--orphan", "main") if not git("branch", "--list", "main", capture=True) else \
-            git("checkout", "-q", "main")
+    git("fetch", "-q", "--prune", "origin")
+    git("checkout", "-q", "-B", "main", "origin/main")
 
 
-def local_backup(stamp, cfg_enc, sec_enc):
-    d = f"{LOCAL}/{stamp}"
-    os.makedirs(d, exist_ok=True)
-    shutil.copy2(cfg_enc, d)
-    shutil.copy2(sec_enc, d)
-    # full DB incl. history (local only), compressed; unencrypted on purpose: the directory is root-only (0700)
-    with open(f"{d}/zabbix-full.sql.zst", "wb") as out:
-        p1 = subprocess.Popen(["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers",
-                               "--hex-blob", "--no-tablespaces", "--default-character-set=utf8mb4", DB],
-                              stdout=subprocess.PIPE)
-        p2 = subprocess.Popen(["zstd", "-q", "-3", "-T0"], stdin=p1.stdout, stdout=out)
-        p1.stdout.close()
-        if p2.wait() or p1.wait():
-            raise RuntimeError("full database dump failed")
-    run(["tar", "-C", "/var/lib", "-I", "zstd -q -T0", "-cf", f"{d}/smokeping-data.tar.zst", "smokeping"])
-    for old in sorted(glob.glob(f"{LOCAL}/20*")):
-        if os.path.getmtime(old) < time.time() - KEEP_LOCAL_DAYS * 86400:
-            shutil.rmtree(old)
-    return d
+def nfs_ready():
+    """The share must be mounted (automount) and writable within 60 s - a hung NFS server must not hang the run."""
+    try:
+        run(["timeout", "60", "sh", "-c", f"ls {NFS} >/dev/null && touch {NFS}/.probe && rm -f {NFS}/.probe"])
+    except subprocess.CalledProcessError:
+        raise RuntimeError(f"NFS {NFS_SOURCE} not reachable or not writable on {NFS}")
+    if run(["findmnt", "-n", "-t", "nfs", NFS], capture_output=True, check=False).returncode:
+        raise RuntimeError(f"{NFS} is not an NFS mount - refusing to write backups to the local disk")
+
+
+def publish(src_dir, root, keep_days, name):
+    """Copy a finished backup folder to root/<name>: copy as .partial, re-read every checksum, then rename."""
+    os.makedirs(root, exist_ok=True)
+    part = f"{root}/{name}.partial"
+    shutil.rmtree(part, ignore_errors=True)
+    os.makedirs(part)
+    manifest = json.load(open(f"{src_dir}/MANIFEST.json"))
+    for f in os.listdir(src_dir):
+        shutil.copyfile(f"{src_dir}/{f}", f"{part}/{f}")   # copyfile: NFS maps root to nobody, no chown
+    for f, meta in manifest["files"].items():
+        if sha256(f"{part}/{f}") != meta["sha256"]:
+            raise RuntimeError(f"checksum mismatch after copying {f} to {root}")
+    os.rename(part, f"{root}/{name}")
+    open(f"{root}/LATEST.txt", "w").write(f"{name}\n")
+    cutoff = time.time() - keep_days * 86400
+    for old in sorted(glob.glob(f"{root}/20*")):
+        base_name = os.path.basename(old)
+        if base_name == name:
+            continue
+        if old.endswith(".partial") or os.path.getmtime(old) < cutoff:
+            shutil.rmtree(old, ignore_errors=True)
 
 
 def write_status(ok, text):
@@ -272,84 +325,80 @@ def write_status(ok, text):
 def main():
     started = time.time()
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+    dry = "--no-push" in sys.argv
     os.umask(0o077)
     tmp = tempfile.mkdtemp(prefix="pi-netmon-backup-", dir="/var/tmp")
+    out = f"{tmp}/{stamp}"
+    os.makedirs(out)
     try:
+        # 1. configuration + documentation -> git (main)
         ensure_checkout()
         secrets = secret_values()
         n = copy_deploy(secrets)
+        write_inventory()
         scan_for_secrets(secrets)
-        log(f"deployment tree: {n} files, no secrets in plain text")
+        log(f"deployment tree: {n} files + inventory, no secrets in plain text")
+        if not dry:
+            nfs_ready()   # check before the long dumps, so a dead NFS fails fast
 
+        # 2. encrypted data files
         sec_tar = f"{tmp}/secrets.tar"
         with tarfile.open(sec_tar, "w") as t:
             for p in SECRETS:
                 if os.path.exists(p):
                     t.add(p)
-        zstd(sec_tar, sec_tar + ".zst")
-        sec_enc = f"{tmp}/secrets.tar.zst.gpg"
-        gpg_encrypt(sec_tar + ".zst", sec_enc)
-        verify(sec_enc, "tar", tmp)
-
-        sql = f"{tmp}/zabbix-config.sql"
-        dump_config_db(sql)
-        zstd(sql, sql + ".zst", level=15)
-        cfg_enc = f"{tmp}/zabbix-config.sql.zst.gpg"
-        gpg_encrypt(sql + ".zst", cfg_enc)
-        verify(cfg_enc, "sql", tmp)
-        log(f"encrypted + verified: config DB {os.path.getsize(cfg_enc) / 1e6:.1f} MB, "
-            f"secrets {os.path.getsize(sec_enc) / 1e3:.0f} kB")
-
-        if "--no-push" in sys.argv:   # check run: build and verify everything, push nothing
+        encrypt_stream(sec_tar, f"{out}/secrets.tar.zst.gpg")
+        os.remove(sec_tar)
+        ign = [f"--ignore-table={DB}.{t}" for t in NO_DATA_TABLES]
+        cfg_sql = f"{tmp}/config.sql"
+        with open(cfg_sql, "wb") as f:
+            run(DUMP + ign + [DB], stdout=f)
+            run(DUMP + ["--no-data", DB] + NO_DATA_TABLES, stdout=f)
+        encrypt_stream(cfg_sql, f"{out}/zabbix-config.sql.zst.gpg", level=15)
+        os.remove(cfg_sql)
+        encrypt_stream(DUMP + [DB], f"{out}/zabbix-full.sql.zst.gpg", level=3)
+        # SmokePing updates its RRD files every few seconds: archive a quick copy, not the live files
+        snap = f"{tmp}/rrd"
+        run(["cp", "-a", "/var/lib/smokeping", snap])
+        encrypt_stream(["tar", "-C", snap, "--transform", "s,^\\.,smokeping,", "-cf", "-", "."],
+                       f"{out}/smokeping-data.tar.zst.gpg", level=3)
+        shutil.rmtree(snap)
+        for f, kind in (("secrets.tar.zst.gpg", "secrets"), ("zabbix-config.sql.zst.gpg", "sql"),
+                        ("zabbix-full.sql.zst.gpg", "sql"), ("smokeping-data.tar.zst.gpg", "tar")):
+            verify(f"{out}/{f}", kind)
+        sizes = {f: os.path.getsize(f"{out}/{f}") for f in os.listdir(out)}
+        log("encrypted + verified: " + ", ".join(f"{f} {s / 1e6:.1f} MB" for f, s in sorted(sizes.items())))
+        if dry:
             git("add", "-A")
-            log("--no-push: staged files:\n" + git("status", "--short", capture=True))
+            log("--no-push: nothing pushed or copied. Staged in git:\n" + (git("status", "--short", capture=True) or "(no changes)"))
             return
-        # main branch: deployment tree, commit only when something changed
+
+        # 3. git: commit only when configuration / docs changed
         git("add", "-A")
         if git("status", "--porcelain", capture=True):
-            git("commit", "-q", "-m", f"Deployment snapshot {stamp}")
+            git("commit", "-q", "-m", f"Configuration snapshot {stamp}")
         git("push", "-q", "origin", "main")
-        main_rev = git("rev-parse", "HEAD", capture=True)
+        rev = git("rev-parse", "HEAD", capture=True)
 
-        # backups branch: exactly one commit with this (verified) run only, replacing the previous backup
-        bdir = f"{tmp}/backups-branch"
-        run(["git", "-C", CHECKOUT, "worktree", "add", "-q", "--detach", bdir], capture_output=True)
-        try:
-            run(["git", "-C", bdir, "checkout", "-q", "--orphan", "backups-new"])
-            run(["git", "-C", bdir, "rm", "-rq", "--cached", "."], check=False, capture_output=True)
-            for f in os.listdir(bdir):
-                if f != ".git":
-                    p = f"{bdir}/{f}"
-                    shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
-            shutil.copy2(cfg_enc, bdir)
-            shutil.copy2(sec_enc, bdir)
-            manifest = {
-                "created": datetime.datetime.now().isoformat(timespec="seconds"), "host": os.uname().nodename,
-                "deployment_commit_on_main": main_rev, "zabbix_version": run(
-                    ["zabbix_server", "-V"], capture_output=True, text=True).stdout.splitlines()[0],
-                "files": {f: {"bytes": os.path.getsize(f"{bdir}/{f}"), "sha256": sha256(f"{bdir}/{f}")}
-                          for f in ("zabbix-config.sql.zst.gpg", "secrets.tar.zst.gpg")},
-                "encryption": "gpg --symmetric AES256, passphrase /root/.credentials/backup_passphrase (not in git)",
-            }
-            open(f"{bdir}/MANIFEST.json", "w").write(json.dumps(manifest, indent=2) + "\n")
-            open(f"{bdir}/README.md", "w").write(
-                "# Latest successful backup\n\nOnly the last successful nightly backup is kept on this branch "
-                "(force-pushed each night after verification). Restore instructions: RESTORE.md on branch main.\n")
-            run(["git", "-C", bdir, "add", "-A"])
-            run(["git", "-C", bdir, "commit", "-q", "-m", f"Backup {stamp}"])
-            run(["git", "-C", bdir, "push", "-q", "-f", "origin", "HEAD:refs/heads/backups"])
-        finally:
-            run(["git", "-C", CHECKOUT, "worktree", "remove", "--force", bdir], check=False, capture_output=True)
-            run(["git", "-C", CHECKOUT, "branch", "-D", "backups-new"], check=False, capture_output=True)
-        log("pushed to GitHub: main + backups (latest only)")
-
-        d = local_backup(stamp, cfg_enc, sec_enc)
-        size = sum(os.path.getsize(p) for p in glob.glob(f"{d}/*")) / 1e9
-        write_status(True, f"backup {stamp} pushed to GitHub, local copy {d} ({size:.2f} GB), "
+        # 4. manifest, then NFS (verified copy) and local
+        manifest = {
+            "created": datetime.datetime.now().isoformat(timespec="seconds"), "host": os.uname().nodename,
+            "git_commit_main": rev, "zabbix_version": run(["zabbix_server", "-V"], capture_output=True,
+                                                         text=True).stdout.splitlines()[0],
+            "encryption": "gpg --symmetric AES256 over zstd; passphrase /root/.credentials/backup_passphrase (not stored here)",
+            "files": {f: {"bytes": os.path.getsize(f"{out}/{f}"), "sha256": sha256(f"{out}/{f}")} for f in sorted(sizes)},
+        }
+        open(f"{out}/MANIFEST.json", "w").write(json.dumps(manifest, indent=2) + "\n")
+        nfs_ready()
+        publish(out, NFS, KEEP_NFS_DAYS, stamp)
+        publish(out, LOCAL, KEEP_LOCAL_DAYS, stamp)
+        total = sum(sizes.values()) / 1e9
+        write_status(True, f"backup {stamp}: git {rev[:7]}, NFS {NFS_SOURCE}/{stamp} ({total:.2f} GB), "
                            f"{time.time() - started:.0f}s")
-        log(f"done: local copy {d} ({size:.2f} GB)")
+        log(f"done: git main {rev[:7]}, NFS + local folder {stamp} ({total:.2f} GB)")
     except Exception as e:
-        write_status(False, f"backup {stamp}: {str(e)[:300]}")
+        if not dry:   # a check run must not raise or clear the Zabbix backup alert
+            write_status(False, f"backup {stamp}: {str(e)[:300]}")
         log(f"FAILED: {e}")
         raise
     finally:

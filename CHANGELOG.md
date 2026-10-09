@@ -1,0 +1,54 @@
+# Changelog
+
+Changes to the Pi Network Monitoring tool, newest first. Every configuration change is also visible in the git
+history of `deploy/` (nightly "Configuration snapshot" commits).
+
+## 2026-10-09
+
+### Backups
+- Nightly backup at 21:00 IST (`/opt/isp/backup/backup.py`): configuration + documentation to this repository
+  (secrets redacted, push blocked if any secret is found); encrypted data backups (full database incl. graph
+  history, configuration database, SmokePing data, secrets bundle) to NFS `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring`
+  (14 nights) and locally (3 nights). Zabbix alerts when a backup fails or none succeeded for 26 h.
+- `restore.sh` and RESTORE.md for single files, the database, or a full rebuild on a new server.
+- Zabbix database password rotated.
+
+### Devices added
+- **Pi VMware Fabric**: 100G spines 1/2 (Arista 7280CR-48), leaves 1/2 (Arista 7050SX3), 5/6 (Arista 7150S-24),
+  leaf 7&8 (HPE 5820AF IRF). Leaf 3&4 (172.20.96.16) added disabled - not reachable by ping/SNMP.
+- **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
+- **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
+- **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).
+- New tuned templates: *HPE Comware by SNMP - PIDC*, *Cisco Catalyst by SNMP - PIDC*, *Huawei VRP by SNMP - PIDC*
+  (traffic every 10 s, status 30 s, errors 1 min, Port state); vendor-neutral "Health: ..." items on all switch
+  templates (CPU, memory, hottest sensor, fans / PSUs not OK, all-port errors and discards).
+- ASR routers (ASR_RTR-1 Airtel, ASR_RTR-2 Jio, Cisco ASR920): interfaces, sensors, PSU / fans, BGP peers;
+  dashboard *ASR Routers*.
+
+### Dashboards and reports
+- Fabric dashboards (one per fabric): health table, port maps, per-switch pages; tiles for temperature, fans and
+  PSUs only on switches that report them.
+- Click-to-graph on every dashboard: each port map and item list has a graph of the clicked item; every page has an
+  "Items on this page" list. Applied automatically every 10 minutes to new devices / dashboards (`click_to_graph.py`).
+- /reports: Dashboard PDF gets per-port (traffic, errors, speed, time up) and per-item charts; Data report PDF/CSV;
+  fix for an endless chart-axis loop on flat negative series (HTTP 500).
+- Daily 08:00 PDF e-mail for every dashboard (`sync_daily_reports.py`); PDF links removed.
+
+### Alerting and thresholds
+- Default thresholds on every device: CPU 75 %, memory 85 % (`set_default_thresholds.py`, hourly);
+  exceptions: 100G leaves 1/2 memory 99 %.
+- E-mail alerts (Average and above) for the A10, all device groups and the Zabbix server itself.
+
+### Platform
+- VM raised to 24 GB: Zabbix caches (config 1 GB, value 1 GB, history 512 MB, ...), MariaDB buffer pool 8 GB,
+  PHP 512 MB (frontend) / 2 GB (reports), OOM protection for MariaDB and the Zabbix server.
+- History 180 days, trends 2 years.
+
+## 2026-10-08
+
+- Zabbix 7.0 + SmokePing server set up on 172.20.119.99 (time zone IST), served as https://isp.picloud.in
+  (Let's Encrypt via acme-dns, auto-renewing; certificate expiry alerts).
+- A10 LLB: the three ISP links (Airtel, Jio, PowerGrid) - port state, gateway reachability, A10 gateway status,
+  utilisation, traffic every 5 s from the A10 private counters, LLB statistics; SLA / customer view (*ISP Link Status*).
+- WAN switches (10G-WAN-Switch01/02) and PiSB cloud fabric (spines / leaves), Arista template tuning, Port state.
+- SmokePing targets editor (/smokeping-admin), report downloader (/reports), e-mail alerts via Office 365.
