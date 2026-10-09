@@ -66,6 +66,8 @@ FILES = [
     "/etc/apache2/conf-available/zabbix-reports.conf", "/etc/apache2/conf-available/zabbix-print-nolinks.conf",
     "/etc/mysql/mariadb.conf.d/60-zabbix-tuning.cnf",
     "/etc/systemd/system/mariadb.service.d/oom.conf", "/etc/systemd/system/zabbix-server.service.d/oom.conf",
+    "/etc/systemd/system/apache2.service.d/memory.conf", "/etc/systemd/system/zabbix-web-service.service.d/memory.conf",
+    "/etc/apache2/conf-available/pidc-memory.conf", "/etc/sysctl.d/90-pidc-memory.conf",
     "/etc/cron.d/zabbix-*", "/etc/cron.d/pi-netmon-backup",
     "/etc/letsencrypt/renewal/*.conf",
     "/etc/apt/sources.list.d/zabbix.sources", "/etc/apt/sources.list.d/zabbix-tools.sources",
@@ -272,6 +274,12 @@ def ensure_checkout():
     git("config", "user.name", "Pi Network Monitoring backup (isp.picloud.in)")
     git("config", "user.email", "backup@isp.picloud.in")
     git("fetch", "-q", "--prune", "origin")
+    # Leftovers of an earlier unfinished or --no-push run would block the rebase. The snapshot is rebuilt from the
+    # live files on every run, so uncommitted changes can go; local commits are kept.
+    if any(os.path.exists(f"{CHECKOUT}/.git/{d}") for d in ("rebase-merge", "rebase-apply")):
+        git("rebase", "--abort")
+    git("reset", "-q", "--hard", "HEAD")
+    git("clean", "-q", "-fd")
     if git("branch", "--list", "main", capture=True):   # keep local commits that are not pushed yet
         git("checkout", "-q", "main")
         git("rebase", "-q", "origin/main")
@@ -365,6 +373,7 @@ def main():
         if dry:
             git("add", "-A")
             log("--no-push: nothing pushed or copied. Staged in git:\n" + (git("status", "--short", capture=True) or "(no changes)"))
+            git("reset", "-q")   # unstage again, so the next real run starts clean
             return
 
         # 3. git: commit only when configuration / docs changed

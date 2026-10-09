@@ -54,6 +54,13 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
   Replaces `fix_uptime_wrap.py` (removed with its cron).
 - **Pi 1G Colo Fabric**: added 1G-COLO-DH5-SW5 172.18.127.209 (1G-COLO-SW-5, Cisco Catalyst 3650-48FQ, IOS-XE
   16.12.8, 2x 1025 W PSU) on *Cisco Catalyst by SNMP - PIDC*, with its own dashboard page.
+- **Memory safety (24 GB VM)**: checked with 34 hosts / 26k items - Zabbix caches 1.5-5 % used, MariaDB 4.2 of 8 GB
+  buffer pool, no OOM kills. Added: Apache limited to 40 workers (recycled after 1000 requests,
+  `pidc-memory.conf`) and capped at 5 GB high / 6 GB max, zabbix-web-service (Chrome PDFs) at 2 / 3 GB, so heavy
+  reports can never starve MariaDB or zabbix-server (both also OOMScoreAdjust -600); `vm.swappiness` 10,
+  `vm.min_free_kbytes` 256 MB. `StartPingers` 1 -> 4 (the single ICMP pinger was 71 % busy).
+- Backup: a `--no-push` check run left its changes staged, which made the next real run fail at the git rebase
+  (no push, no NFS copy). The checkout is now cleaned before syncing and the check run unstages again.
 - **Pi MMR Cross Connect Fabric**: MMR1 SW1-SW5 (Cisco Catalyst 2960 / 2960S / 4500 / 2960X).
 - **Pi DH5 Cross Connect Fabric**: DH5 SW1-SW4 (Cisco Catalyst 2960 / 2960S / 4500).
 - **Pi 1G Colo Fabric**: 1G-COLO SW1-SW3 (Huawei S5720).

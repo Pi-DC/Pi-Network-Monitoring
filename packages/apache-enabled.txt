@@ -30,6 +30,7 @@ conf charset
 conf javascript-common
 conf localized-error-pages
 conf other-vhosts-access-log
+conf pidc-memory
 conf security
 conf serve-cgi-bin
 conf zabbix-print-nolinks
