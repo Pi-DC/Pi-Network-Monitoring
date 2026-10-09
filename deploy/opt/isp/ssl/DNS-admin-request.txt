@@ -1,0 +1,63 @@
+Request for the picloud.in DNS admin - automatic Let's Encrypt certificate for isp.picloud.in
+=============================================================================================
+
+Why
+  The ISP monitoring server (172.20.119.99, internet egress 103.210.74.5) needs a publicly trusted
+  certificate for https://isp.picloud.in that renews by itself. Let's Encrypt proves domain control
+  by checking a TXT record at _acme-challenge.isp.picloud.in. With a DNS update key the server can
+  create/delete that one TXT record itself every ~60 days. Nothing else in the zone can be changed
+  with this key, and no public A record or open port is needed.
+
+What we need (one-time)
+  1. A TSIG key, e.g. named  isp-picloud-acme  (algorithm hmac-sha512).
+  2. Permission for that key to update ONLY the TXT record _acme-challenge.isp.picloud.in
+     on the primary server ns3.picloud.in (103.210.73.180).
+  3. ns4.picloud.in (103.210.73.181) to pick up changes within ~1 minute (NOTIFY / zone transfer),
+     because Let's Encrypt may query either server.
+  4. UDP+TCP 53 from 172.20.119.99 / 103.210.74.5 to 103.210.73.180 allowed (it already is today).
+  5. Send back the key NAME and SECRET over a secure channel.
+
+If the servers run BIND 9
+  On ns3:
+    tsig-keygen -a hmac-sha512 isp-picloud-acme > /etc/bind/isp-picloud-acme.key
+    chown root:bind /etc/bind/isp-picloud-acme.key && chmod 640 /etc/bind/isp-picloud-acme.key
+
+  named.conf (or named.conf.local):
+    include "/etc/bind/isp-picloud-acme.key";
+
+    zone "picloud.in" {
+        type primary;                       # existing settings stay as they are
+        file "...";
+        update-policy {
+            grant isp-picloud-acme. name _acme-challenge.isp.picloud.in. TXT;
+        };
+        notify yes;                         # so ns4 gets the change quickly
+    };
+
+  Notes
+    - update-policy cannot be combined with an existing "allow-update" in the same zone.
+    - A zone that accepts dynamic updates keeps a .jnl journal. To hand-edit the zone file later:
+        rndc freeze picloud.in  ->  edit, bump serial  ->  rndc thaw picloud.in
+    - rndc reconfig (or reload) after the change.
+
+  Test from any machine with the key (optional):
+    nsupdate -y hmac-sha512:isp-picloud-acme:<secret> <<EOF
+    server 103.210.73.180
+    update add _acme-challenge.isp.picloud.in. 60 TXT "test"
+    send
+    EOF
+    dig +short TXT _acme-challenge.isp.picloud.in @103.210.73.181     # should show "test" within ~1 min
+    (then delete it the same way with "update delete _acme-challenge.isp.picloud.in. TXT")
+
+If the servers run PowerDNS
+  Enable dnsupdate=yes, create the TSIG key (pdnsutil generate-tsig-key isp-picloud-acme hmac-sha512),
+  and allow it for the zone (TSIG-ALLOW-DNSUPDATE metadata) restricted to the server's address.
+
+If the servers run Windows DNS
+  Windows DNS does not support TSIG keys. Instead add one CNAME record and we use an ACME DNS
+  service; ask the monitoring admin for the target name.
+
+Also noticed (unrelated but worth fixing)
+  Public DNS lists a third NS record for picloud.in whose target is just "ns3." (no domain).
+  That name does not resolve; resolvers that pick it will fail over and slow down. Please check
+  the NS records in the zone and at the registrar.

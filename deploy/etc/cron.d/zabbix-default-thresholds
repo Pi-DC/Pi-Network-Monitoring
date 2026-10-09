@@ -1,0 +1,3 @@
+# Default CPU 75% / memory 85% alert thresholds on every template and the A10 (host-level exceptions are kept).
+# Script: /opt/isp/zabbix/set_default_thresholds.py - output (only when something changed) goes to the log.
+40 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 set_default_thresholds.py >> /var/log/zabbix/default-thresholds.log 2>&1

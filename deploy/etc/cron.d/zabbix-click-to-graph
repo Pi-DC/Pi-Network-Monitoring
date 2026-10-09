@@ -1,0 +1,5 @@
+# Click-to-graph: give every item navigator / honeycomb map on every dashboard a graph of the clicked item
+# plus an "Items on this page" list + graph on every page with room (kept in step with the page). New devices, pages and
+# dashboards are picked up within 10 minutes; end a widget or dashboard name with "[no graph]" to opt out.
+# Script: /opt/isp/zabbix/click_to_graph.py - output (only when something changed) goes to the log; -v lists maps skipped for lack of room.
+*/10 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 click_to_graph.py >> /var/log/zabbix/click-to-graph.log 2>&1

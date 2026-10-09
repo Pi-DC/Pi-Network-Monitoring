@@ -1,0 +1,6 @@
+Types: deb deb-src
+URIs: https://repo.zabbix.com/zabbix-tools/debian-ubuntu
+Suites: noble
+Components: main
+Signed-By: /usr/share/keyrings/zabbix.gpg
+Architectures: all

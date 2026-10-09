@@ -1,0 +1,3 @@
+# Keep one daily PDF report e-mail per Zabbix dashboard (new dashboards are picked up within the hour).
+# Script: /opt/isp/zabbix/sync_daily_reports.py - output (only when something changed) goes to the log.
+15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1

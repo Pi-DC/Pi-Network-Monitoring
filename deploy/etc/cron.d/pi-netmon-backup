@@ -1,0 +1,3 @@
+# Nightly backup of the Pi Network Monitoring tool to GitHub (git@github.com:Pi-DC/Pi-Network-Monitoring.git) and
+# /var/backups/pi-network-monitoring, at 21:00 IST. Script and restore guide: /opt/isp/backup/ (README.md, RESTORE.md).
+0 21 * * * root /usr/bin/python3 /opt/isp/backup/backup.py >> /var/log/pi-netmon-backup.log 2>&1
