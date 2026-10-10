@@ -3,6 +3,17 @@
 Changes to the Pi Network Monitoring tool, newest first. Every configuration change is also visible in the git
 history of `deploy/` (nightly "Configuration snapshot" commits).
 
+## 2026-10-10
+
+### Daily report e-mails: every port and every item
+- The 08:00 IST daily e-mails (one per dashboard, previous day) are now sent by `zabbix/send_daily_reports.py`
+  instead of Zabbix's native scheduled reports, which print only what fits on the dashboard screen. Each PDF is
+  the /reports "Dashboard PDF" with "all ports, plus all items" (`zabbix/daily_pdf.php`): every dashboard page
+  followed by a panel per port (traffic in/out, errors/discards, speed, % up, state) and a chart per item.
+  If a PDF would exceed 20 MB, ports without traffic that day are left out (none do today; largest 9.4 MB).
+- Native "Daily: <dashboard>" scheduled reports are kept but disabled (`sync_daily_reports.py`, STATUS = 1).
+- Log: /var/log/zabbix/daily-reports.log. Test/resend: `send_daily_reports.py --only "<dashboard>" --date YYYY-MM-DD [--to addr]`.
+
 ## 2026-10-09
 
 ### Backups

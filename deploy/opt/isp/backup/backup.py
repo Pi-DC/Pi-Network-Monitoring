@@ -56,7 +56,7 @@ DUMP = ["mysqldump", "--single-transaction", "--quick", "--routines", "--trigger
 
 # Deployment files (plain text in git after redaction). Globs; directories are copied recursively.
 FILES = [
-    "/opt/isp/zabbix/*.py", "/opt/isp/reports/index.php", "/opt/isp/reports/print-nolinks.js",
+    "/opt/isp/zabbix/*.py", "/opt/isp/zabbix/*.php", "/opt/isp/reports/index.php", "/opt/isp/reports/print-nolinks.js",
     "/opt/isp/ssl/*", "/opt/isp/backup/*",
     "/etc/zabbix/zabbix_server.conf", "/etc/zabbix/web/zabbix.conf.php", "/etc/zabbix/apache.conf",
     "/etc/zabbix/zabbix_agent2.conf", "/etc/zabbix/zabbix_agent2.d", "/etc/zabbix/zabbix_server.d",

@@ -1,3 +1,6 @@
-# Keep one daily PDF report e-mail per Zabbix dashboard (new dashboards are picked up within the hour).
-# Script: /opt/isp/zabbix/sync_daily_reports.py - output (only when something changed) goes to the log.
+# Daily 08:00 IST PDF e-mail per Zabbix dashboard, including a chart for EVERY port and EVERY item (previous day).
+# Sender: /opt/isp/zabbix/send_daily_reports.py (PDF built by daily_pdf.php = /reports "Dashboard PDF", all ports + all items).
+# New dashboards are picked up automatically. Log: /var/log/zabbix/daily-reports.log
+0 8 * * * root cd /opt/isp/zabbix && /usr/bin/python3 send_daily_reports.py >> /var/log/zabbix/daily-reports.log 2>&1
+# Keeps the native Zabbix "Daily: <dashboard>" scheduled reports in sync but DISABLED (they print only what fits on screen).
 15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1

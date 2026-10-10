@@ -69,6 +69,7 @@ Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-dev
 
 - `pi-netmon-backup`: `0 21 * * * root /usr/bin/python3 /opt/isp/backup/backup.py >> /var/log/pi-netmon-backup.log 2>&1`
 - `zabbix-click-to-graph`: `*/10 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 click_to_graph.py >> /var/log/zabbix/click-to-graph.log 2>&1`
+- `zabbix-daily-reports`: `0 8 * * * root cd /opt/isp/zabbix && /usr/bin/python3 send_daily_reports.py >> /var/log/zabbix/daily-reports.log 2>&1`
 - `zabbix-daily-reports`: `15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1`
 - `zabbix-default-thresholds`: `40 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 set_default_thresholds.py >> /var/log/zabbix/default-thresholds.log 2>&1`
 - `zabbix-device-uptime`: `* * * * * root cd /opt/isp/zabbix && /usr/bin/python3 device_uptime.py >> /var/log/zabbix/device-uptime.log 2>&1`

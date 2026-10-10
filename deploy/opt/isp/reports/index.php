@@ -26,11 +26,14 @@ const PDF_MAX_TABLE_ROWS = 20000;   // data table rows in a PDF (~45 rows per A4
 const PDF_COLS_PER_TABLE = 8;       // value columns per table block, so tables fit A4 landscape
 const CHART_POINTS = 1500;          // charts with more steps than this are drawn per pixel column (min/avg/max kept)
 
-session_name('ispreports');
-session_set_cookie_params(['secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
-session_start();
-if (empty($_SESSION['csrf'])) {
-    $_SESSION['csrf'] = bin2hex(random_bytes(16));
+// daily-email.php includes this file from the command line as a library (REPORTS_LIB): no web session, no routing.
+if (!defined('REPORTS_LIB')) {
+    session_name('ispreports');
+    session_set_cookie_params(['secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
+    session_start();
+    if (empty($_SESSION['csrf'])) {
+        $_SESSION['csrf'] = bin2hex(random_bytes(16));
+    }
 }
 
 function h(string $s): string { return htmlspecialchars($s, ENT_QUOTES); }
@@ -922,6 +925,8 @@ svg { width: 100%; height: auto; display: block; }
 }
 
 // ---- Routing ------------------------------------------------------------------------------------------
+if (defined('REPORTS_LIB')) return;
+
 $error = null;
 
 if (isset($_GET['logout'])) {
