@@ -1,0 +1,25 @@
+# Logs of the Pi Network Monitoring helper scripts (cron jobs in /etc/cron.d/zabbix-* and pi-netmon-*)
+/var/log/zabbix/watchdog.log /var/log/zabbix/daily-reports.log /var/log/zabbix/daily-reports-sync.log
+/var/log/zabbix/disable-dead-items.log /var/log/zabbix/click-to-graph.log /var/log/zabbix/default-thresholds.log
+/var/log/zabbix/device-uptime.log {
+    monthly
+    rotate 12
+    maxsize 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+/var/log/pi-netmon-backup.log {
+    su root syslog
+    monthly
+    rotate 12
+    maxsize 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

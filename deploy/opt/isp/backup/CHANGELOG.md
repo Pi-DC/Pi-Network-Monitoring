@@ -5,6 +5,19 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
 
 ## 2026-10-10
 
+### Stability / self-healing
+- Time sync: the clock was never synchronised (internet NTP blocked, 7 s behind). Now NTP 172.20.119.37 / .38
+  (`/etc/systemd/timesyncd.conf.d/pidc-ntp.conf`).
+- All core services (zabbix-server, mariadb, apache2, zabbix-web-service, zabbix-agent2) restart after ANY failure,
+  10 s delay, never give up (`restart.conf` drop-ins); before, MariaDB/Apache restarted only on some crash types.
+- `zabbix/watchdog.py` every 2 min (`/etc/cron.d/pi-netmon-watchdog`): starts stopped services, restarts a stuck
+  zabbix-server (no new data for 10 min) or a hung web UI, warns on disk > 90 % / NTP lost; e-mails directly via
+  Office365 (works when Zabbix itself is down). Pause: `touch /etc/pi-netmon-watchdog.disable`.
+- `zabbix/disable_dead_items.py` hourly: disables management-port traffic items without 64-bit counters (Gi0, Fa1,
+  Gi0/0 ...) - they wrote ~160k log lines in 2 days.
+- Kernel panic -> automatic reboot after 10 s (`/etc/sysctl.d/91-pidc-autorecover.conf`); log rotation for the
+  helper-script logs (`/etc/logrotate.d/pi-netmon`) and a 500 MB cap on zabbix_server.log.
+
 ### Daily report e-mails: every port and every item
 - The 08:00 IST daily e-mails (one per dashboard, previous day) are now sent by `zabbix/send_daily_reports.py`
   instead of Zabbix's native scheduled reports, which print only what fits on the dashboard screen. Each PDF is

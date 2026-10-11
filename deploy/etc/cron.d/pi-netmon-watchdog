@@ -1,0 +1,3 @@
+# Self-healing watchdog: restarts stopped/stuck services, e-mails problems directly via Office365 (not via Zabbix).
+# Script: /opt/isp/zabbix/watchdog.py. Pause it for maintenance: touch /etc/pi-netmon-watchdog.disable
+*/2 * * * * root cd /opt/isp/zabbix && /usr/bin/timeout 900 /usr/bin/python3 watchdog.py >> /var/log/zabbix/watchdog.log 2>&1

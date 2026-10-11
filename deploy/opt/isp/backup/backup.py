@@ -67,7 +67,9 @@ FILES = [
     "/etc/systemd/system/mariadb.service.d/oom.conf", "/etc/systemd/system/zabbix-server.service.d/oom.conf",
     "/etc/systemd/system/apache2.service.d/memory.conf", "/etc/systemd/system/zabbix-web-service.service.d/memory.conf",
     "/etc/apache2/conf-available/pidc-memory.conf", "/etc/sysctl.d/90-pidc-memory.conf",
-    "/etc/cron.d/zabbix-*", "/etc/cron.d/pi-netmon-backup",
+    "/etc/systemd/system/*.service.d/restart.conf", "/etc/systemd/timesyncd.conf.d/pidc-ntp.conf",
+    "/etc/sysctl.d/91-pidc-autorecover.conf", "/etc/logrotate.d/pi-netmon", "/etc/logrotate.d/zabbix-server-mysql",
+    "/etc/cron.d/zabbix-*", "/etc/cron.d/pi-netmon-*",
     "/etc/letsencrypt/renewal/*.conf",
     "/etc/apt/sources.list.d/zabbix.sources", "/etc/apt/sources.list.d/zabbix-tools.sources",
     "/etc/apt/sources.list.d/google-chrome.sources",
@@ -241,7 +243,7 @@ def write_inventory():
             out.append(f"- **{a['name']}**: severity Average and above on {', '.join(sorted(filter(None, scope)))}")
     out += ["", "Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-device exceptions are host macros.",
             "", "## Scheduled jobs (`/etc/cron.d`)", ""]
-    for f in sorted(glob.glob("/etc/cron.d/zabbix-*") + ["/etc/cron.d/pi-netmon-backup"]):
+    for f in sorted(glob.glob("/etc/cron.d/zabbix-*") + glob.glob("/etc/cron.d/pi-netmon-*")):
         for line in open(f):
             if line.strip() and not line.startswith("#"):
                 out.append(f"- `{os.path.basename(f)}`: `{line.strip()}`")
