@@ -35,21 +35,21 @@ ICMP_ONLY = "ICMP Ping"
 SWITCHES = [  # host, visible name, IP, template, role, vendor, enabled
     ("100G_Spine_SW-1", "100G_Spine_SW-1 (GE35SS01)", "172.20.96.33", ARISTA, "spine", "arista", True),
     ("100G_Spine_SW-2", "100G_Spine_SW-2 (GE35SS02)", "172.20.96.34", ARISTA, "spine", "arista", True),
-    ("100G_Leaf_SW-1", "100G_Leaf_SW-1 (GE33LS01)", "172.20.96.19", ARISTA, "leaf", "arista", True),   # DCS-7050SX3-48YC12
-    ("100G_Leaf_SW-2", "100G_Leaf_SW-2 (GE33LS02)", "172.20.96.18", ARISTA, "leaf", "arista", True),   # DCS-7050SX3-48YC12
-    ("100G_Leaf_SW-3-4", "100G_Leaf_SW-3&4 (100G-Leaf-3 & Leaf-4)", "172.20.96.16", HUAWEI, "leaf", "huawei", True),
+    ("25G_Leaf_SW-1", "25G_Leaf_SW-1 (GE33LS01)", "172.20.96.19", ARISTA, "leaf", "arista", True),   # DCS-7050SX3-48YC12
+    ("25G_Leaf_SW-2", "25G_Leaf_SW-2 (GE33LS02)", "172.20.96.18", ARISTA, "leaf", "arista", True),   # DCS-7050SX3-48YC12
+    ("10G_Leaf_SW-3-4", "10G_Leaf_SW-3&4 (100G-Leaf-3 & Leaf-4)", "172.20.96.16", HUAWEI, "leaf", "huawei", True),
     # ^ Huawei S6720S-26Q-EI-24S-AC iStack (2 members); unreachable when first added, answered ping/SNMP 2026-10-09
-    ("100G_Leaf_SW-5", "100G_Leaf_SW-5 (PiAMRDC-100G-LFSW-05)", "172.20.96.35", ARISTA, "leaf", "arista", True),
-    ("100G_Leaf_SW-6", "100G_Leaf_SW-6 (PiAMRDC-100G-LFSW-06)", "172.20.96.36", ARISTA, "leaf", "arista", True),
-    ("100G_Leaf_SW-7-8", "100G-Leaf_SW-7&8 (100G-LF-7&8)", "172.20.97.212", COMWARE, "leaf", "hpe", True),
+    ("10G_Leaf_SW-5", "10G_Leaf_SW-5 (PiAMRDC-100G-LFSW-05)", "172.20.96.35", ARISTA, "leaf", "arista", True),
+    ("10G_Leaf_SW-6", "10G_Leaf_SW-6 (PiAMRDC-100G-LFSW-06)", "172.20.96.36", ARISTA, "leaf", "arista", True),
+    ("10G_Leaf_SW-7-8", "10G-Leaf_SW-7&8 (100G-LF-7&8)", "172.20.97.212", COMWARE, "leaf", "hpe", True),
 ]
 # Physical ports and port-channels only: also skip VLAN SVIs (318 on each spine), Cisco internal "VLAN-..." and
 # stack ports (no counters).
 # Per-host threshold overrides. Leaves 1/2 (7050SX3) run steadily at ~97% RAM (2026-10-09), so the default 90%
 # alert fired permanently; 99% still catches real memory exhaustion.
 HOST_MACROS = {
-    "100G_Leaf_SW-1": {"{$MEMORY.UTIL.MAX}": ("99", "7050SX3 runs at ~97% RAM normally (default 90)")},
-    "100G_Leaf_SW-2": {"{$MEMORY.UTIL.MAX}": ("99", "7050SX3 runs at ~97% RAM normally (default 90)")},
+    "25G_Leaf_SW-1": {"{$MEMORY.UTIL.MAX}": ("99", "7050SX3 runs at ~97% RAM normally (default 90)")},
+    "25G_Leaf_SW-2": {"{$MEMORY.UTIL.MAX}": ("99", "7050SX3 runs at ~97% RAM normally (default 90)")},
 }
 IFNAME_NOT_MATCHES = (r"(^Software Loopback Interface|^NULL[0-9.]*$|^[Ll]o[0-9.]*$|^[Ss]ystem$|^Nu[0-9.]*$|"
                       r"^veth[0-9a-z]+$|docker[0-9]+|br-[a-z0-9]{12}|^Loopback[0-9]+$|^InLoopBack[0-9]+$|^Vi[0-9]+$|"

@@ -86,6 +86,8 @@ dl.google.com and the NFS server 172.16.95.5, and the backup passphrase.
    - Open https://isp.picloud.in/zabbix (same accounts) and /reports. Data arrives within ~2 minutes.
    - SmokePing is not part of the backup: install and configure it separately if it is wanted on the new server.
    - The TLS certificate comes from the bundle; renewal works as before.
+   - Recreate the read-only MariaDB monitoring user and agent checks: `cd /opt/isp/zabbix && python3
+     add_server_monitoring.py` (password from `/root/.credentials/zabbix_mysql_monitor`; also re-routes the cron jobs).
    - `rm /root/backup_passphrase` (it is now in `/root/.credentials/backup_passphrase`).
    - Run one backup by hand: `/opt/isp/backup/backup.py`.
 

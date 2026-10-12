@@ -39,9 +39,16 @@ def log(msg):
 def build_pdf(dashid, day, mode, path):
     start = dt.datetime.combine(day, dt.time())
     end = start + dt.timedelta(days=1)
-    subprocess.run(["php", PHP_CLI, str(dashid), start.strftime("%Y-%m-%dT%H:%M"), end.strftime("%Y-%m-%dT%H:%M"), path, mode],
-                   check=True, capture_output=True, text=True, timeout=1800)
-    return os.path.getsize(path)
+    for attempt in range(3):   # the headless-browser render occasionally times out ("failed to get ready"): retry
+        try:
+            subprocess.run(["php", PHP_CLI, str(dashid), start.strftime("%Y-%m-%dT%H:%M"), end.strftime("%Y-%m-%dT%H:%M"),
+                            path, mode], check=True, capture_output=True, text=True, timeout=1800)
+            return os.path.getsize(path)
+        except subprocess.CalledProcessError as e:
+            if attempt == 2:
+                raise
+            log(f"dashboard {dashid}: render attempt {attempt + 1} failed ({(e.stderr or e.stdout).strip()[-160:]}), retrying in 30 s")
+            time.sleep(30)
 
 
 def send(recipients, subject, body, pdf_path, filename):

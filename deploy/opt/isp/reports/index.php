@@ -12,7 +12,7 @@ set_time_limit(300);
 const API = 'http://127.0.0.1/zabbix/api_jsonrpc.php';
 const ZBX_CONF = '/etc/zabbix/web/zabbix.conf.php';
 const TZ_OFFSET = 19800;            // IST, so 1 h / 1 day buckets start on the IST hour / midnight
-const MAX_ITEMS = 300;
+const MAX_ITEMS = 30000;
 const MAX_CELLS = 2000000;          // rows x columns (or raw samples) per export
 const MAX_DAYS = 180;               // history retention is 180 days (Zabbix housekeeping override)
 const PREVIEW_ROWS = 60;
@@ -113,8 +113,15 @@ function parseTime(string $s): int {
 }
 
 // ---- Request validation shared by preview and download ------------------------------------------------
+// Selected item ids: one comma-separated "items" field (the form sends it that way so thousands of items stay under
+// PHP's max_input_vars = 1000), or the older items[] array.
+function postedItems(): array {
+    $v = $_POST['items'] ?? [];
+    return is_array($v) ? $v : explode(',', (string)$v);
+}
+
 function readRequest(): array {
-    $ids = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['items'] ?? [])))));
+    $ids = array_values(array_unique(array_filter(array_map('intval', postedItems()))));
     if (!$ids) throw new InvalidArgumentException('Select at least one item.');
     if (count($ids) > MAX_ITEMS) throw new InvalidArgumentException('Select at most ' . MAX_ITEMS . ' items per report.');
     $from = parseTime((string)($_POST['from'] ?? ''));
@@ -997,6 +1004,7 @@ try {
         try {
             if (!hash_equals($_SESSION['csrf'], (string)($_POST['csrf'] ?? ''))) throw new RuntimeException('Session expired, please reload the page.');
             $r = readRequest();
+            set_time_limit(1800);   // up to MAX_ITEMS items: a few thousand 5-10 s items over a day take several minutes
             $cells = estimateCells($r);
             if ($cells > MAX_CELLS) {
                 throw new InvalidArgumentException(sprintf('That report would have about %s values (limit %s). Choose a larger step, a shorter range or fewer items.',
@@ -1244,7 +1252,7 @@ const PICKED = new Set(<?= json_encode(array_map('strval', (array)($_POST['pages
     <div class="row" style="margin-top:14px">
       <button type="submit" class="primary" id="dl" onclick="document.getElementById('mode').value='download'">Download CSV</button>
       <button type="submit" onclick="document.getElementById('mode').value='preview'">Preview</button>
-      <span class="hint">CSV opens directly in Excel. Data is kept for 180 days; up to <?= MAX_ITEMS ?> items per report.</span>
+      <span class="hint">CSV opens directly in Excel. Data is kept for 180 days; up to <?= number_format(MAX_ITEMS) ?> items per report.</span>
     </div>
   </div>
 </form>
@@ -1261,7 +1269,7 @@ const PICKED = new Set(<?= json_encode(array_map('strval', (array)($_POST['pages
 <?php endif; ?>
 
 <script>
-const selected = new Set(<?= json_encode(array_values(array_map('strval', (array)($_POST['items'] ?? [])))) ?>);
+const selected = new Set(<?= json_encode(array_values(array_map('strval', array_filter(array_map('intval', postedItems()))))) ?>);
 const selectedHosts = new Set(<?= json_encode(array_values(array_map('strval', (array)($_POST['hostsel'] ?? [])))) ?>);
 const PRESETS = [
   {label: 'ISP bandwidth (Mbps)', hosts: /A10/i, keys: /^isp\.(mbps\.(in|out)|total\.(in|out))/},
@@ -1302,7 +1310,7 @@ function render() {
   const frag = document.createDocumentFragment();
   let lastHost = null, n = 0;
   for (const i of shown) {
-    if (n++ > 3000) { const d = document.createElement('div'); d.className = 'grp'; d.textContent = 'Too many items, refine the filter…'; frag.append(d); break; }
+    if (n++ > 3000) { const d = document.createElement('div'); d.className = 'grp'; d.textContent = `${shown.length.toLocaleString()} items match; first 3,000 listed ("Select shown" selects all matches)`; frag.append(d); break; }
     if (i.hostid !== lastHost) { const d = document.createElement('div'); d.className = 'grp'; d.textContent = hostName(i.hostid); frag.append(d); lastHost = i.hostid; }
     const l = document.createElement('label');
     const c = document.createElement('input'); c.type = 'checkbox'; c.value = i.id; c.checked = selected.has(i.id);
@@ -1312,7 +1320,7 @@ function render() {
     l.append(c, t, m); frag.append(l);
   }
   box.replaceChildren(frag);
-  box.dataset.shown = JSON.stringify(shown.slice(0, 3000).map(i => i.id));
+  box.dataset.shown = JSON.stringify(shown.map(i => i.id));   // all matches, also those past the 3000 rows drawn
   updateCount();
 }
 
@@ -1356,7 +1364,7 @@ $('#f').onsubmit = e => {
   document.querySelectorAll('#f input.gen').forEach(x => x.remove());
   if (!selected.size) { e.preventDefault(); alert('Select at least one item.'); return; }
   const add = (n, v) => { const x = document.createElement('input'); x.type = 'hidden'; x.className = 'gen'; x.name = n; x.value = v; $('#f').append(x); };
-  selected.forEach(id => add('items[]', id));
+  add('items', [...selected].join(','));
   hostBoxes().filter(b => b.checked).forEach(b => add('hostsel[]', b.value));
 };
 if (selectedHosts.size) loadItems();
@@ -1400,7 +1408,7 @@ if (selectedHosts.size) loadItems();
   $('#dash').onchange = pages; pages();
   $('#pf').onsubmit = () => {
     $('#busy').style.display = 'inline'; $('#idle').style.display = 'none';
-    setTimeout(() => { $('#busy').style.display = 'none'; $('#idle').style.display = 'inline'; }, 300000);
+    setTimeout(() => { $('#busy').style.display = 'none'; $('#idle').style.display = 'inline'; }, 1800000);
   };
 })();
 </script>

@@ -61,8 +61,9 @@ def pp(*steps):
     return base.pp(*steps)
 
 
-def clone_template(z, source=SOURCE, template=TEMPLATE, description=None):
-    """Copy template `source` to `template` (all name references renamed, fresh uuids). False if it exists."""
+def clone_template(z, source=SOURCE, template=TEMPLATE, description=None, dashboards=True):
+    """Copy template `source` to `template` (all name references renamed, fresh uuids). False if it exists.
+    dashboards=False leaves the template dashboards out (FortiGate's fail to import: their graphs are not found)."""
     if z.call("template.get", {"filter": {"host": [template]}}):
         return False
     src = z.call("template.get", {"filter": {"host": [source]}, "output": ["templateid"]})[0]["templateid"]
@@ -84,6 +85,8 @@ def clone_template(z, source=SOURCE, template=TEMPLATE, description=None):
         elif isinstance(o, list):
             for v in o:
                 new_uuids(v)
+    if not dashboards:
+        t.pop("dashboards", None)
     new_uuids(t)
     data["zabbix_export"]["templates"] = [t]
     rules = {"templates": {"createMissing": True}, "items": {"createMissing": True},
@@ -282,17 +285,8 @@ def add_bgp(z, tid):
                  delay="30s", value_type=UINT, valuemapid=session_vm, history="90d", trends="0", tags=tags,
                  params="last(//bgp.peer.state[{#SNMPINDEX}])*(last(//bgp.peer.admin[{#SNMPINDEX}])=2)",
                  description="BGP state, or 0 = shutdown when the peer is administratively disabled.")
-    st, ad, up = (f"/{TEMPLATE}/bgp.peer.{k}[{{#SNMPINDEX}}]" for k in ("state", "admin", "uptime"))
-    ensure_trigger(z, rule, "BGP peer {#SNMPINDEX} (AS{#REMOTE_AS}) is not established", priority=3,
-                   expression=f"last({st})<>6 and last({ad})=2",
-                   recovery_mode=1, recovery_expression=f"last({st})=6 or last({ad})=1",
-                   tags=[{"tag": "scope", "value": "availability"}, {"tag": "bgp_peer", "value": "{#SNMPINDEX}"}],
-                   comments="The BGP session is enabled (not shut down) but not Established.")
-    ensure_trigger(z, rule, "BGP peer {#SNMPINDEX} (AS{#REMOTE_AS}) session re-established (flap)", priority=2,
-                   expression=f"last({st})=6 and last({up})<600 and last({up},#2)>last({up})",
-                   recovery_mode=1, recovery_expression=f"last({up})>=600",
-                   tags=[{"tag": "scope", "value": "availability"}, {"tag": "bgp_peer", "value": "{#SNMPINDEX}"}],
-                   comments="The session came back up within the last 10 minutes (it went down and recovered).")
+    # Alerts for these peers come from add_full_coverage.asr_bgp (CISCO-BGP4-MIB, IPv4 + IPv6), which also deletes
+    # any trigger prototypes left on this rule.
 
 
 def template_macros(z, tid):

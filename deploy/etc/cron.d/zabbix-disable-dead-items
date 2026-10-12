@@ -1,3 +1,3 @@
 # Disable discovered interface traffic items that can never work (mgmt ports without 64-bit counters) - stops log flooding.
 # Script: /opt/isp/zabbix/disable_dead_items.py - output (only when it disabled something) goes to the log.
-25 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 disable_dead_items.py >> /var/log/zabbix/disable-dead-items.log 2>&1
+25 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py disable_dead_items -- /usr/bin/python3 disable_dead_items.py >> /var/log/zabbix/disable-dead-items.log 2>&1

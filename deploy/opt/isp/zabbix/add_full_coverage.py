@@ -1,0 +1,974 @@
+#!/usr/bin/env python3
+"""Full SNMP coverage for the ASR routers and every network switch (all six PIDC templates).
+
+Adds to the vendor templates (so every device of that model, present and future, gets it):
+  All          per-port broadcast / multicast received, link-flap alert, Ethernet error counters (FCS/CRC,
+               alignment, symbol, late collisions), routing-table size
+  LLDP         neighbour system name and port per local port (Arista, Catalyst, HPE, Juniper); CDP on Catalyst
+  LACP         member bundled / partner in sync (Catalyst, ASR, HPE, Juniper, Arista where the switch exports it)
+  STP          topology changes, time since last change, root bridge, root port (Catalyst, HPE, Huawei, Juniper)
+  Stacking     Cisco StackWise members + stack ports + ring, HPE IRF, Juniper Virtual Chassis, Huawei iStack
+  Optics       transceiver Rx / Tx power and bias with the module's own alarm thresholds (Arista, Catalyst, HPE,
+               Huawei, Juniper; the ASR already had them)
+  Config       running config changed / not saved (Cisco), last commit (Juniper), config change counter (Huawei)
+  Services     PoE budget and port faults, flash use, NTP sync, UDLD, IP SLA probes, VRFs, IP statistics (Cisco)
+  ASR only     BGP for IPv4 AND IPv6 (CISCO-BGP4-MIB: state, flaps, last error text, updates, accepted / denied /
+               advertised / withdrawn prefixes), VRRP groups, QoS per class (offered / delivered / dropped),
+               entity alarm counts
+Values that rarely change are stored only when they change (with an hourly heartbeat), so idle ports cost
+almost nothing on disk. Idempotent; re-run after changing it.
+"""
+import json
+import sys
+
+import setup_isp_links as base
+
+AR, CAT, ASR = "Arista by SNMP - PIDC", "Cisco Catalyst by SNMP - PIDC", "Cisco ASR920 by SNMP - PIDC"
+HPE, HW, JNX = "HPE Comware by SNMP - PIDC", "Huawei VRP by SNMP - PIDC", "Juniper by SNMP - PIDC"
+SONICWALL = "SonicWall by SNMP - PIDC"
+ALL = (AR, CAT, ASR, HPE, HW, JNX)
+SNMP, DEPENDENT, CALCULATED = 20, 18, 15
+FLOAT, CHAR, UINT, TEXT = 0, 1, 3, 4
+WALK_VALUE, JS = 28, 21
+SIMPLE_CHANGE, CPS, MULT, DISCARD_HB = 9, 10, 1, 20
+TRENDS = "730d"
+IFNAME = "1.3.6.1.2.1.31.1.1.1.1"
+IFOPER = "1.3.6.1.2.1.2.2.1.8"
+IFADMIN = "1.3.6.1.2.1.2.2.1.7"
+
+# Parses Zabbix walk[] text ('.oid = TYPE: value' per line) into {oid: value}; C(o, prefix) = one column by index.
+WALK_JS = r"""
+function W(v) { var o = {}; v.split('\n').forEach(function (l) {
+    var i = l.indexOf(' = '); if (i < 0) return;
+    var m = l.slice(i + 3).match(/^([A-Za-z0-9-]+): ([\s\S]*)$/), x = m ? m[2] : l.slice(i + 3);
+    o[l.slice(0, i).replace(/^\./, '')] = x.replace(/^"([\s\S]*)"$/, '$1').trim(); }); return o; }
+function C(o, p) { var r = {}; p += '.'; for (var k in o) if (k.indexOf(p) === 0) r[k.slice(p.length)] = o[k]; return r; }
+function hexbyte(x) { var b = (x || '').trim().split(/\s+/)[0]; return b ? parseInt(b, 16) : 0; }
+// Adds {#DOM.IFX} = ifIndex of the optic's port: {#DOM.IF} when the table is ifIndex-based, else ifName matched to
+// the first word of {#DOM.NAME} (exactly, or by 2-letter abbreviation: GigabitEthernet1/0/51 = Gi1/0/51).
+// No match = treated as up, so the alarm still works.
+function ports(o, out) { var ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1');
+    function ab(x) { var m = x.match(/^([A-Za-z]{2})[A-Za-z-]*([0-9][0-9\/.:]*)$/); return m ? m[1].toLowerCase() + m[2] : x; }
+    out.forEach(function (e) { var w = e['{#DOM.NAME}'].split(' ')[0], x = e['{#DOM.IF}'] || '';
+        if (!x) for (var i in ifn) if (ifn[i] === w) { x = i; break; }
+        if (!x) for (var j in ifn) if (ab(ifn[j]) === ab(w)) { x = j; break; }
+        var l = w.replace(/\/\d+$/, '/1');           // extra lane of a 40/100G optic (Ethernet44/3) -> its port Ethernet44/1
+        if (!x && l !== w) for (var k in ifn) if (ifn[k] === l) { x = k; break; }
+        e['{#DOM.IFX}'] = x; }); return out; }
+function ip(x) { var b = (x || '').trim().split(/\s+/); if (b.length === 4) return b.map(function (h) { return parseInt(h, 16); }).join('.'); return x; }
+"""
+
+
+def js(body):
+    return (WALK_JS + body).strip()
+
+
+class Template:
+    """Idempotent create helpers bound to one template."""
+
+    def __init__(self, z, name):
+        self.z, self.name = z, name
+        self.tid = z.call("template.get", {"filter": {"host": [name]}, "output": ["templateid"]})[0]["templateid"]
+        self.items = {i["key_"]: i["itemid"] for i in z.call("item.get", {"templateids": self.tid, "output": ["key_"]})}
+        self.rules = {r["key_"]: r["itemid"] for r in z.call("discoveryrule.get", {"templateids": self.tid, "output": ["key_"]})}
+        self.vms = {v["name"]: v["valuemapid"] for v in z.call("valuemap.get", {"hostids": self.tid, "output": ["valuemapid", "name"]})}
+        self.triggers = {t["description"] for t in z.call("trigger.get", {"templateids": self.tid, "output": ["description"],
+                                                                          "filter": {"flags": 0}})}
+        self.n = {"items": 0, "rules": 0, "prototypes": 0, "triggers": 0}
+
+    def vm(self, name, pairs):
+        if name not in self.vms:
+            self.vms[name] = self.z.call("valuemap.create", {"hostid": self.tid, "name": name, "mappings": [
+                {"value": str(v), "newvalue": t} for v, t in pairs]})["valuemapids"][0]
+        return self.vms[name]
+
+    def item(self, key, **kw):
+        if key not in self.items:
+            kw.setdefault("history", "90d")
+            self.items[key] = self.z.call("item.create", {"hostid": self.tid, "key_": key, **kw})["itemids"][0]
+            self.n["items"] += 1
+        return self.items[key]
+
+    def walk(self, key, label, oids, delay):
+        return self.item(key, name=f"SNMP walk: {label}", type=SNMP, snmp_oid="walk[" + ",".join(oids) + "]",
+                         delay=delay, value_type=TEXT, history="0", trends="0",
+                         tags=[{"tag": "component", "value": "raw"}],
+                         **({"timeout": "15s"} if self.name == HW else {}))    # Huawei agents walk slowly (iStack Leaf-3&4)
+
+    def dep(self, master, key, name, steps, **kw):
+        kw.setdefault("value_type", FLOAT)
+        kw.setdefault("trends", TRENDS if kw["value_type"] in (FLOAT, UINT) else "0")
+        return self.item(key, name=name, type=DEPENDENT, master_itemid=master, preprocessing=base.pp(*steps), **kw)
+
+    def rule(self, key, master, name, body, **kw):
+        if key not in self.rules:
+            self.rules[key] = self.z.call("discoveryrule.create", {
+                "hostid": self.tid, "key_": key, "name": name, "type": DEPENDENT, "master_itemid": master,
+                "lifetime": "7d", "preprocessing": base.pp((JS, js(body)), (DISCARD_HB, "1h")), **kw})["itemids"][0]
+            self.n["rules"] += 1
+        return self.rules[key]
+
+    def proto(self, rid, key, name, master, steps, **kw):
+        found = self.z.call("itemprototype.get", {"discoveryids": rid, "filter": {"key_": key}, "output": ["itemid"]})
+        if found:
+            return found[0]["itemid"]
+        kw.setdefault("value_type", FLOAT)
+        kw.setdefault("trends", TRENDS if kw["value_type"] in (FLOAT, UINT) else "0")
+        kw.setdefault("history", "90d")
+        if master:
+            kw.update(type=DEPENDENT, master_itemid=master, preprocessing=base.pp(*steps))
+        self.n["prototypes"] += 1
+        return self.z.call("itemprototype.create", {"hostid": self.tid, "ruleid": rid, "key_": key, "name": name,
+                                                     **kw})["itemids"][0]
+
+    def tproto(self, rid, description, expression, priority, component, **kw):
+        have = {t["description"] for t in self.z.call("triggerprototype.get", {"discoveryids": rid, "output": ["description"]})}
+        if description not in have:
+            self.n["triggers"] += 1
+            return self.z.call("triggerprototype.create", {"description": description, "expression": expression,
+                                                            "priority": priority, "tags": [{"tag": "component", "value": component}],
+                                                            **kw})["triggerids"][0]
+
+    def trigger(self, description, expression, priority, component, **kw):
+        if description not in self.triggers:
+            self.z.call("trigger.create", {"description": description, "expression": expression, "priority": priority,
+                                           "tags": [{"tag": "component", "value": component}], **kw})
+            self.triggers.add(description)
+            self.n["triggers"] += 1
+
+    def macro(self, macro, value, description):
+        have = {m["macro"] for m in self.z.call("usermacro.get", {"hostids": self.tid, "output": ["macro"]})}
+        if macro not in have:
+            self.z.call("usermacro.create", {"hostid": self.tid, "macro": macro, "value": value, "description": description})
+
+    def k(self, key):
+        """Item reference for trigger expressions."""
+        return f"/{self.name}/{key}"
+
+
+def wv(oid, optional=False):
+    """Value of one OID from a walk; optional = discard quietly when the device has no such OID."""
+    return (WALK_VALUE, f"{oid}\n0", 1) if optional else (WALK_VALUE, f"{oid}\n0")
+
+
+def on_change(hb="1h"):
+    return (DISCARD_HB, hb)
+
+
+# ======================================================================================== all templates
+def ports(t):
+    """Broadcast / multicast received per port, link flapping, Ethernet error counters, routing table size."""
+    rid = t.rules["net.if.discovery"]
+    m = t.walk("pidc.if.cast.walk", "broadcast / multicast counters", ["1.3.6.1.2.1.31.1.1.1.9", "1.3.6.1.2.1.31.1.1.1.8"], "1m")
+    tags = [{"tag": "component", "value": "network"}, {"tag": "interface", "value": "{#IFNAME}"}]
+    for oid, key, label in (("1.3.6.1.2.1.31.1.1.1.9", "bcast", "Broadcast received"),
+                            ("1.3.6.1.2.1.31.1.1.1.8", "mcast", "Multicast received")):
+        t.proto(rid, f"pidc.if.in.{key}[{{#SNMPINDEX}}]", f"Interface {{#IFNAME}}({{#IFALIAS}}): {label}", m,
+                [wv(f"{oid}.{{#SNMPINDEX}}"), (CPS, ""), on_change()], units="pps", tags=tags)
+    t.macro("{$IF.BCAST.MAX}", "5000", "Broadcast storm alert: broadcasts received per second on one port (5 min)")
+    t.macro("{$IF.FLAPS.MAX}", "4", "Link-flap alert: status changes of one port within 15 minutes")
+    t.macro("{$IF.FCS.MAX}", "10", "Ethernet error alert: FCS / alignment / symbol errors on one port per 5 minutes")
+    t.tproto(rid, "Interface {#IFNAME}({#IFALIAS}): broadcast storm (over {$IF.BCAST.MAX:\"{#IFNAME}\"} pps for 5m)",
+             f"min({t.k('pidc.if.in.bcast[{#SNMPINDEX}]')},5m)>{{$IF.BCAST.MAX:\"{{#IFNAME}}\"}}", 3, "network")
+    t.tproto(rid, "Interface {#IFNAME}({#IFALIAS}): link flapping (over {$IF.FLAPS.MAX:\"{#IFNAME}\"} changes in 15m)",
+             f"changecount({t.k('net.if.status[ifOperStatus.{#SNMPINDEX}]')},15m)>{{$IF.FLAPS.MAX:\"{{#IFNAME}}\"}}", 2,
+             "network", comments="The port went up and down repeatedly: check cable, optics and the device at the other end.")
+
+    rid = t.rules["net.if.duplex.discovery"]   # Ethernet ports that are up (EtherLike-MIB rows)
+    e = "1.3.6.1.2.1.10.7.2.1"
+    m = t.walk("pidc.if.ether.walk", "Ethernet error counters", [f"{e}.2", f"{e}.3", f"{e}.8", f"{e}.18"], "5m")
+    for col, key, label in ((3, "fcs", "FCS/CRC errors"), (2, "align", "Alignment errors"),
+                            (18, "symbol", "Symbol errors"), (8, "latecoll", "Late collisions")):
+        t.proto(rid, f"pidc.if.ether.{key}[{{#SNMPINDEX}}]", f"Interface {{#IFNAME}}({{#IFALIAS}}): {label} (per 5 min)", m,
+                [wv(f"{e}.{col}.{{#SNMPINDEX}}"), (SIMPLE_CHANGE, ""), on_change()], value_type=UINT, tags=tags)
+    for key, label in (("fcs", "FCS/CRC"), ("align", "alignment"), ("symbol", "symbol")):
+        t.tproto(rid, f"Interface {{#IFNAME}}({{#IFALIAS}}): {label} errors (over {{$IF.FCS.MAX:\"{{#IFNAME}}\"}} in 5 min)",
+                 f"last({t.k(f'pidc.if.ether.{key}[{{#SNMPINDEX}}]')})>{{$IF.FCS.MAX:\"{{#IFNAME}}\"}}", 2, "network",
+                 comments="Corrupted frames arriving on this port: usually a bad cable, dirty / failing optic or patch.")
+    t.tproto(rid, "Interface {#IFNAME}({#IFALIAS}): late collisions (duplex mismatch?)",
+             f"last({t.k('pidc.if.ether.latecoll[{#SNMPINDEX}]')})>0", 2, "network")
+
+    m = t.walk("pidc.routes.walk", "routing table size", ["1.3.6.1.2.1.4.24.6", "1.3.6.1.2.1.4.24.3"], "5m")
+    t.dep(m, "pidc.routes", "Routes in routing table", [(JS, js(
+        "var o = W(value), a = parseInt(o['1.3.6.1.2.1.4.24.6.0'] || '0'), b = parseInt(o['1.3.6.1.2.1.4.24.3.0'] || '0');"
+        "return Math.max(a, b);"))], value_type=UINT, tags=[{"tag": "component", "value": "routing"}])
+    t.trigger("Routing table shrank by more than half (now {ITEM.LASTVALUE})",
+              f"last({t.k('pidc.routes')})<max({t.k('pidc.routes')},1h:now-10m)/2 and max({t.k('pidc.routes')},1h:now-10m)>=4",
+              3, "routing", comments="Routes were withdrawn: a routing neighbour, uplink or default route was lost.")
+
+
+LLDP_RULE_JS = r"""
+var o = W(value), sys = C(o, '1.0.8802.1.1.2.1.4.1.1.9'), pid = C(o, '1.0.8802.1.1.2.1.3.7.1.3'), pdesc = C(o, '1.0.8802.1.1.2.1.3.7.1.4');
+var seen = {}, out = [];
+for (var k in sys) { var p = k.split('.')[1]; if (seen[p]) continue; seen[p] = 1;
+    var name = (pid[p] && !/^([0-9A-F]{2} ){5}[0-9A-F]{2}$/i.test(pid[p])) ? pid[p] : (pdesc[p] || ('port ' + p));
+    out.push({'{#LLDP.LOCALNUM}': p, '{#LLDP.LOCALPORT}': name}); }
+return JSON.stringify(out);
+"""
+LLDP_VALUE_JS = r"""
+var o = W(value), want = '{#LLDP.LOCALNUM}', col = C(o, '1.0.8802.1.1.2.1.4.1.1.%s'), alt = C(o, '1.0.8802.1.1.2.1.4.1.1.7');
+for (var k in col) if (k.split('.')[1] === want) return col[k] || alt[k] || '(unnamed)';
+return '(none)';
+"""
+
+
+def lldp(t):
+    r = "1.0.8802.1.1.2.1.4.1.1"
+    m = t.walk("pidc.lldp.walk", "LLDP neighbours", [f"{r}.7", f"{r}.8", f"{r}.9", "1.0.8802.1.1.2.1.3.7.1.3",
+                                                     "1.0.8802.1.1.2.1.3.7.1.4"], "5m")
+    rid = t.rule("pidc.lldp.discovery", m, "LLDP neighbour discovery", LLDP_RULE_JS)
+    tags = [{"tag": "component", "value": "neighbours"}, {"tag": "interface", "value": "{#LLDP.LOCALPORT}"}]
+    for col, key, label in (("9", "sysname", "system name"), ("8", "port", "remote port")):
+        t.proto(rid, f"pidc.lldp.{key}[{{#LLDP.LOCALNUM}}]", f"LLDP neighbour on {{#LLDP.LOCALPORT}}: {label}", m,
+                [(JS, js(LLDP_VALUE_JS % col)), on_change()], value_type=CHAR, tags=tags)
+    k = t.k("pidc.lldp.sysname[{#LLDP.LOCALNUM}]")
+    t.tproto(rid, "LLDP neighbour on {#LLDP.LOCALPORT} lost", f'last({k})="(none)"', 2, "neighbours",
+             comments="The device that was connected to this port is no longer seen (port down, device off or re-cabled).")
+    t.tproto(rid, "LLDP neighbour on {#LLDP.LOCALPORT} changed to {ITEM.LASTVALUE}",
+             f'last({k})<>last({k},#2) and last({k})<>"(none)" and last({k},#2)<>"(none)"', 1, "neighbours")
+    t.dep(m, "pidc.lldp.count", "LLDP neighbours", [(JS, js(
+        "var n = 0, s = C(W(value), '1.0.8802.1.1.2.1.4.1.1.9'); for (var k in s) n++; return n;"))],
+        value_type=UINT, tags=[{"tag": "component", "value": "neighbours"}])
+
+
+CDP_RULE_JS = r"""
+var o = W(value), dev = C(o, '1.3.6.1.4.1.9.9.23.1.2.1.1.6'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), seen = {}, out = [];
+for (var k in dev) { var i = k.split('.')[0]; if (seen[i]) continue; seen[i] = 1;
+    out.push({'{#CDP.IFINDEX}': i, '{#CDP.LOCALPORT}': ifn[i] || ('ifIndex ' + i)}); }
+return JSON.stringify(out);
+"""
+CDP_VALUE_JS = r"""
+var col = C(W(value), '1.3.6.1.4.1.9.9.23.1.2.1.1.%s');
+for (var k in col) if (k.split('.')[0] === '{#CDP.IFINDEX}') return col[k] || '(unnamed)';
+return '(none)';
+"""
+
+
+def cdp(t):
+    c = "1.3.6.1.4.1.9.9.23.1.2.1.1"
+    m = t.walk("pidc.cdp.walk", "CDP neighbours", [f"{c}.6", f"{c}.7", f"{c}.8", IFNAME], "5m")
+    rid = t.rule("pidc.cdp.discovery", m, "CDP neighbour discovery", CDP_RULE_JS)
+    tags = [{"tag": "component", "value": "neighbours"}, {"tag": "interface", "value": "{#CDP.LOCALPORT}"}]
+    for col, key, label in (("6", "device", "device"), ("7", "port", "remote port"), ("8", "platform", "platform")):
+        t.proto(rid, f"pidc.cdp.{key}[{{#CDP.IFINDEX}}]", f"CDP neighbour on {{#CDP.LOCALPORT}}: {label}", m,
+                [(JS, js(CDP_VALUE_JS % col)), on_change()], value_type=CHAR, tags=tags)
+    t.tproto(rid, "CDP neighbour on {#CDP.LOCALPORT} lost", f'last({t.k("pidc.cdp.device[{#CDP.IFINDEX}]")})="(none)"',
+             2, "neighbours")
+
+
+LACP_RULE_JS = r"""
+var o = W(value), key = C(o, '1.2.840.10006.300.43.1.2.1.1.4'), sel = C(o, '1.2.840.10006.300.43.1.2.1.1.12'),
+    att = C(o, '1.2.840.10006.300.43.1.2.1.1.13'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), out = [];
+for (var i in key) {
+    var agg = (att[i] && att[i] !== '0') ? att[i] : sel[i];
+    if ((key[i] && key[i] !== '0') || (sel[i] && sel[i] !== '0') || (att[i] && att[i] !== '0'))
+        out.push({'{#LACP.IFINDEX}': i, '{#LACP.PORT}': ifn[i] || i,
+                  '{#LACP.AGG}': (agg && agg !== '0') ? (ifn[agg] || agg) : ('key ' + key[i])});
+}
+return JSON.stringify(out);
+"""
+LACP_STATE_JS = r"""
+var s = C(W(value), '1.2.840.10006.300.43.1.2.1.1.%s')['{#LACP.IFINDEX}'];
+if (s === undefined) throw 'port not in LACP table';
+return (hexbyte(s) & 0x38) === 0x38 ? 1 : 0;     // synchronisation + collecting + distributing
+"""
+
+
+LACP_ADMIN_JS = r"""
+var s = C(W(value), '1.3.6.1.2.1.2.2.1.7')['{#LACP.IFINDEX}'];
+return s === undefined ? 1 : parseInt(s);        // no ifAdminStatus row = treat as up, so the alert still works
+"""
+
+
+def lacp(t):
+    a = "1.2.840.10006.300.43.1.2.1.1"
+    oids = [f"{a}.4", f"{a}.12", f"{a}.13", f"{a}.21", f"{a}.23", IFNAME, IFADMIN]
+    m = t.walk("pidc.lacp.walk", "LACP member ports", oids, "1m")
+    want_oid = "walk[" + ",".join(oids) + "]"     # IFADMIN added 2026-10-12: update the walk on existing templates
+    if t.z.call("item.get", {"itemids": m, "output": ["snmp_oid"]})[0]["snmp_oid"] != want_oid:
+        t.z.call("item.update", {"itemid": m, "snmp_oid": want_oid})
+    rid = t.rule("pidc.lacp.discovery", m, "LACP member port discovery", LACP_RULE_JS)
+    vm = t.vm("LACP member state", [(0, "not bundled"), (1, "bundled")])
+    tags = [{"tag": "component", "value": "lacp"}, {"tag": "interface", "value": "{#LACP.PORT}"}]
+    for col, key, label in (("21", "actor", "Bundled"), ("23", "partner", "Partner in sync")):
+        t.proto(rid, f"pidc.lacp.{key}[{{#LACP.IFINDEX}}]", f"LACP {{#LACP.PORT}} in {{#LACP.AGG}}: {label}", m,
+                [(JS, js(LACP_STATE_JS % col)), on_change("10m")], value_type=UINT, valuemapid=vm, trends="0", tags=tags)
+    t.proto(rid, "pidc.lacp.admin[{#LACP.IFINDEX}]", "LACP {#LACP.PORT} in {#LACP.AGG}: Port admin status", m,
+            [(JS, js(LACP_ADMIN_JS)), on_change("10m")], value_type=UINT, trends="0", tags=tags,
+            valuemapid=t.vm("IF-MIB::ifAdminStatus (LACP)", [(1, "up"), (2, "down"), (3, "testing")]))
+    # A member port that is admin-shutdown is never bundled by design: alert only for admin-up members
+    # (user request 2026-10-12). A port that is admin-up but link-down still alerts (the bundle really lost a link).
+    desc = "LACP member {#LACP.PORT} is not bundled in {#LACP.AGG}"
+    expr = (f"max({t.k('pidc.lacp.actor[{#LACP.IFINDEX}]')},3m)=0"
+            f" and last({t.k('pidc.lacp.admin[{#LACP.IFINDEX}]')})=1")
+    comments = ("The port-channel runs on fewer links than configured (member down, or LACP not negotiated with the "
+                "far end). Members that are admin-shutdown do not alert.")
+    t.tproto(rid, desc, expr, 3, "lacp", comments=comments)
+    tp = t.z.call("triggerprototype.get", {"discoveryids": rid, "filter": {"description": desc},
+                                           "output": ["triggerid", "expression"], "expandExpression": True})
+    if tp and tp[0]["expression"] != expr:
+        t.z.call("triggerprototype.update", {"triggerid": tp[0]["triggerid"], "expression": expr, "comments": comments})
+        print(f"{t.name}: LACP trigger now ignores admin-shutdown members")
+
+
+def stp(t):
+    s = "1.3.6.1.2.1.17.2"
+    m = t.walk("pidc.stp.walk", "spanning tree", [f"{s}.3", f"{s}.4", f"{s}.5", f"{s}.7"], "5m")
+    tags = [{"tag": "component", "value": "stp"}]
+    t.dep(m, "pidc.stp.tc", "STP: topology changes (per 5 min)", [wv(f"{s}.4.0", True), (SIMPLE_CHANGE, "")], value_type=UINT, tags=tags)
+    t.dep(m, "pidc.stp.since", "STP: time since last topology change", [wv(f"{s}.3.0", True), (MULT, "0.01")],
+          units="uptime", tags=tags)
+    t.dep(m, "pidc.stp.root", "STP: root bridge", [wv(f"{s}.5.0", True), on_change()], value_type=CHAR, tags=tags)
+    t.dep(m, "pidc.stp.rootport", "STP: root port", [wv(f"{s}.7.0", True), on_change()], value_type=UINT, trends="0", tags=tags)
+    t.macro("{$STP.TC.MAX}", "3", "STP alert: topology changes per 5 minutes")
+    t.trigger("STP: topology changing ({ITEM.LASTVALUE} changes in 5 min)",
+              f"last({t.k('pidc.stp.tc')})>{{$STP.TC.MAX}}", 2, "stp",
+              comments="Spanning tree recalculated repeatedly: MAC tables flush and traffic floods. Look for a flapping port or a loop.")
+    t.trigger("STP: root bridge changed", f"last({t.k('pidc.stp.root')})<>last({t.k('pidc.stp.root')},#2)", 3, "stp")
+
+
+# ======================================================================================== Cisco
+def cisco_config(t):
+    c = "1.3.6.1.4.1.9.9.43.1.1"
+    m = t.walk("pidc.ccm.walk", "configuration history", [f"{c}.1", f"{c}.3"], "5m")
+    tags = [{"tag": "component", "value": "config"}]
+    t.dep(m, "pidc.ccm.running", "Config: running config last changed (sysUpTime)", [wv(f"{c}.1.0"), on_change("1d")],
+          value_type=UINT, trends="0", tags=tags)
+    t.dep(m, "pidc.ccm.startup", "Config: startup config last written (sysUpTime)", [wv(f"{c}.3.0"), on_change("1d")],
+          value_type=UINT, trends="0", tags=tags)
+    t.item("pidc.ccm.unsaved", name="Config: running config not saved", type=CALCULATED, delay="5m", value_type=UINT,
+           trends="0", valuemapid=t.vm("Config saved", [(0, "saved"), (1, "NOT saved")]), tags=tags,
+           params=f"last(//pidc.ccm.running)>last(//pidc.ccm.startup)")
+    t.trigger("Config: running configuration changed and not saved for 1h", f"min({t.k('pidc.ccm.unsaved')},1h)=1", 2,
+              "config", comments="A reload would lose the change. Save with 'write memory' (or revert).")
+    t.trigger("Config: configuration changed", f"last({t.k('pidc.ccm.running')})>last({t.k('pidc.ccm.running')},#2)", 1,
+              "config")
+
+
+def cisco_stack(t):
+    s = "1.3.6.1.4.1.9.9.500"
+    m = t.walk("pidc.stack.walk", "StackWise", [f"{s}.1.1.3", f"{s}.1.2.1.1.1", f"{s}.1.2.1.1.3", f"{s}.1.2.1.1.6",
+                                                f"{s}.1.2.2.1.1", IFNAME], "1m")
+    tags = [{"tag": "component", "value": "stack"}]
+    rid = t.rule("pidc.stack.member.discovery", m, "Stack member discovery", r"""
+var o = W(value), num = C(o, '1.3.6.1.4.1.9.9.500.1.2.1.1.1'), out = [];
+for (var i in num) out.push({'{#STACK.INDEX}': i, '{#STACK.MEMBER}': num[i]});
+return JSON.stringify(out);""")
+    state = t.vm("cswSwitchState", [(1, "waiting"), (2, "progressing"), (3, "added"), (4, "ready"), (5, "sdmMismatch"),
+                                    (6, "verMismatch"), (7, "featureMismatch"), (8, "newMasterInit"), (9, "provisioned"),
+                                    (10, "invalid"), (11, "removed")])
+    role = t.vm("cswSwitchRole", [(1, "master"), (2, "member"), (3, "notMember"), (4, "standby")])
+    t.proto(rid, "pidc.stack.state[{#STACK.INDEX}]", "Stack member {#STACK.MEMBER}: state", m,
+            [wv(f"{s}.1.2.1.1.6.{{#STACK.INDEX}}"), on_change("10m")], value_type=UINT, trends="0", valuemapid=state, tags=tags)
+    t.proto(rid, "pidc.stack.role[{#STACK.INDEX}]", "Stack member {#STACK.MEMBER}: role", m,
+            [wv(f"{s}.1.2.1.1.3.{{#STACK.INDEX}}"), on_change()], value_type=UINT, trends="0", valuemapid=role, tags=tags)
+    t.tproto(rid, "Stack member {#STACK.MEMBER} is not ready (state {ITEM.LASTVALUE})",
+             f"last({t.k('pidc.stack.state[{#STACK.INDEX}]')})<>4", 4, "stack")
+    t.tproto(rid, "Stack member {#STACK.MEMBER} changed role to {ITEM.LASTVALUE}",
+             f"last({t.k('pidc.stack.role[{#STACK.INDEX}]')})<>last({t.k('pidc.stack.role[{#STACK.INDEX}]')},#2)", 3, "stack")
+    t.dep(m, "pidc.stack.members", "Stack members", [(JS, js(
+        "var n = 0, s = C(W(value), '1.3.6.1.4.1.9.9.500.1.2.1.1.6'); for (var k in s) n++; return n;"))],
+        value_type=UINT, tags=tags)
+    t.dep(m, "pidc.stack.ring", "Stack ring redundant", [wv(f"{s}.1.1.3.0", True), on_change()], value_type=UINT, trends="0",
+          valuemapid=t.vm("TruthValue", [(1, "true"), (2, "false")]), tags=tags)
+    t.trigger("Stack lost a member (now {ITEM.LASTVALUE})",
+              f"last({t.k('pidc.stack.members')})<max({t.k('pidc.stack.members')},1h:now-5m)", 4, "stack")
+    t.trigger("Stack ring is not redundant (one stack cable / port down)",
+              f"last({t.k('pidc.stack.ring')})=2 and last({t.k('pidc.stack.members')})>2", 3, "stack")
+    prid = t.rule("pidc.stack.port.discovery", m, "Stack port discovery", r"""
+var o = W(value), st = C(o, '1.3.6.1.4.1.9.9.500.1.2.2.1.1'), mem = C(o, '1.3.6.1.4.1.9.9.500.1.2.1.1.6'),
+    ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), n = 0, out = [];
+for (var k in mem) n++;
+if (n > 1) for (var i in st) out.push({'{#STACKPORT.INDEX}': i, '{#STACKPORT}': ifn[i] || ('stack port ' + i)});
+return JSON.stringify(out);""")
+    t.proto(prid, "pidc.stack.port[{#STACKPORT.INDEX}]", "Stack port {#STACKPORT}: status", m,
+            [wv(f"{s}.1.2.2.1.1.{{#STACKPORT.INDEX}}"), on_change("10m")], value_type=UINT, trends="0",
+            valuemapid=t.vm("cswStackPortOperStatus", [(1, "up"), (2, "down"), (3, "forcedDown")]), tags=tags)
+    t.tproto(prid, "Stack port {#STACKPORT} is down", f"last({t.k('pidc.stack.port[{#STACKPORT.INDEX}]')})<>1", 3, "stack")
+
+
+CISCO_DOM_RULE_JS = r"""
+var o = W(value), typ = C(o, '1.3.6.1.4.1.9.9.91.1.1.1.1.1'), name = C(o, '1.3.6.1.2.1.47.1.1.1.1.7'),
+    tv = C(o, '1.3.6.1.4.1.9.9.91.1.2.1.1.4'), ts = C(o, '1.3.6.1.4.1.9.9.91.1.2.1.1.2'), tr = C(o, '1.3.6.1.4.1.9.9.91.1.2.1.1.3'),
+    prec = C(o, '1.3.6.1.4.1.9.9.91.1.1.1.1.3'), out = [];
+for (var i in typ) {
+    if (typ[i] !== '14') continue;                    // dBm sensors = transceiver Rx / Tx power
+    var n = name[i] || ('sensor ' + i), lw = -40, lc = -40, p = Math.pow(10, parseInt(prec[i] || '0'));
+    for (var k in tv) { var e = k.split('.'); if (e[0] !== i) continue;
+        if (tr[k] === '1' || tr[k] === '2') {           // lessThan / lessOrEqual: low thresholds
+            var v = parseInt(tv[k]) / p; if (ts[k] === '10') lw = Math.max(lw, v); else lc = Math.max(lc, v); } }
+    out.push({'{#DOM.INDEX}': i, '{#DOM.NAME}': n.replace(/\s+/g, ' ').trim(), '{#DOM.KIND}': /Rx|Receive/i.test(n) ? 'rx' : 'tx',
+              '{#DOM.LOWARN}': lw === -40 ? lc : lw, '{#DOM.LOCRIT}': lc});
+}
+return JSON.stringify(ports(o, out));
+"""
+
+
+def cisco_dom(t):
+    s = "1.3.6.1.4.1.9.9.91.1"
+    m = t.walk("pidc.dom.walk", "transceiver sensors", [f"{s}.1.1.1.1", f"{s}.1.1.1.3", f"{s}.1.1.1.4",
+                                                         f"{s}.2.1.1.2", f"{s}.2.1.1.3", f"{s}.2.1.1.4",
+                                                         "1.3.6.1.2.1.47.1.1.1.1.7", IFNAME, IFOPER], "1m")
+    rid = t.rule("pidc.dom.discovery", m, "Transceiver optical power discovery", CISCO_DOM_RULE_JS)
+    t.proto(rid, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME}", m,
+            [(JS, js("var o = W(value), v = o['1.3.6.1.4.1.9.9.91.1.1.1.1.4.{#DOM.INDEX}'], "
+                     "p = o['1.3.6.1.4.1.9.9.91.1.1.1.1.3.{#DOM.INDEX}'] || '0';"
+                     "if (v === undefined) throw 'no sensor'; return parseInt(v) / Math.pow(10, parseInt(p));"))],
+            units="dBm", tags=[{"tag": "component", "value": "optics"}, {"tag": "optic", "value": "{#DOM.KIND}"}])
+    optic_triggers(t, rid, m, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME}")
+
+
+def optic_triggers(t, rid, m, key, label):
+    """Low-power alarms only while the optic's port is up: a dark / unused port reads ~-40 dBm and is already covered
+    by the port's link-down alert. The warning is suppressed while the alarm is active."""
+    t.proto(rid, "pidc.dom.up[{#DOM.INDEX}]", label + " port link", m, [(JS, js(
+        "var x = '{#DOM.IFX}'; if (!x) return 1; var v = W(value)['1.3.6.1.2.1.2.2.1.8.' + x];"
+        "return v === undefined ? 1 : parseInt(v);")), on_change()], value_type=UINT, trends="0",
+        valuemapid=t.vm("IF-MIB::ifOperStatus (PIDC)", [(1, "up"), (2, "down"), (3, "testing"), (4, "unknown"),
+                                                        (5, "dormant"), (6, "notPresent"), (7, "lowerLayerDown")]),
+        tags=[{"tag": "component", "value": "optics"}])
+    k, up = t.k(key), t.k("pidc.dom.up[{#DOM.INDEX}]")
+    crit = t.tproto(rid, f"{label}: power below the module's low-alarm threshold ({{#DOM.LOCRIT}} dBm)",
+                    f"max({k},5m)<{{#DOM.LOCRIT}} and last({up})=1", 4, "optics",
+                    comments="Port is up but the light level is at the failure point: clean or replace the optic / patch cord, check the far-end laser.")
+    t.tproto(rid, f"{label}: power below the module's low-warning threshold ({{#DOM.LOWARN}} dBm)",
+             f"max({k},5m)<{{#DOM.LOWARN}} and last({up})=1", 2, "optics",
+             comments="Port is up but the optical margin is low. Plan cleaning / replacement before the link starts erroring.",
+             dependencies=[{"triggerid": crit}] if crit else [])
+
+
+def cisco_flash(t):
+    f = "1.3.6.1.4.1.9.9.10.1.1.4.1.1"
+    m = t.walk("pidc.flash.walk", "flash partitions", [f"{f}.10", f"{f}.13", f"{f}.14"], "1h")
+    rid = t.rule("pidc.flash.discovery", m, "Flash partition discovery", r"""
+var o = W(value), n = C(o, '1.3.6.1.4.1.9.9.10.1.1.4.1.1.10'), s = C(o, '1.3.6.1.4.1.9.9.10.1.1.4.1.1.13'), out = [];
+for (var i in n) if (parseInt(s[i] || '0') > 0) out.push({'{#FLASH.INDEX}': i, '{#FLASH}': n[i] || i});
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "storage"}]
+    t.proto(rid, "pidc.flash.size[{#FLASH.INDEX}]", "Flash {#FLASH}: size", m, [wv(f"{f}.13.{{#FLASH.INDEX}}"), on_change("1d")],
+            value_type=UINT, units="B", tags=tags)
+    t.proto(rid, "pidc.flash.free[{#FLASH.INDEX}]", "Flash {#FLASH}: free", m, [wv(f"{f}.14.{{#FLASH.INDEX}}")],
+            value_type=UINT, units="B", tags=tags)
+    t.proto(rid, "pidc.flash.pused[{#FLASH.INDEX}]", "Flash {#FLASH}: used %", None, [], type=CALCULATED, delay="1h",
+            units="%", tags=tags, params="100-last(//pidc.flash.free[{#FLASH.INDEX}])/last(//pidc.flash.size[{#FLASH.INDEX}])*100")
+    t.tproto(rid, "Flash {#FLASH} is over 90% full", f"last({t.k('pidc.flash.pused[{#FLASH.INDEX}]')})>90", 2, "storage",
+             comments="Software upgrades and crash files need flash space: remove old images.")
+
+
+def cisco_ntp(t):
+    m = t.walk("pidc.ntp.walk", "NTP status", ["1.3.6.1.4.1.9.9.168.1.1.1"], "5m")
+    tags = [{"tag": "component", "value": "ntp"}]
+    t.dep(m, "pidc.ntp.leap", "NTP: synchronisation", [(JS, js(
+        "var o = W(value), l = o['1.3.6.1.4.1.9.9.168.1.1.1.0']; return l === undefined ? 4 : parseInt(l);")),
+        on_change()], value_type=UINT, trends="0",
+        valuemapid=t.vm("cntpSysLeap", [(0, "synchronised"), (1, "synchronised (leap +1)"), (2, "synchronised (leap -1)"),
+                                        (3, "NOT synchronised"), (4, "NTP not configured")]), tags=tags)
+    t.trigger("NTP: clock not synchronised", f"min({t.k('pidc.ntp.leap')},15m)=3", 2, "ntp",
+              comments="Logs and alarms from this device carry wrong timestamps until NTP syncs again.")
+
+
+def cisco_udld(t):
+    u = "1.3.6.1.4.1.9.9.118.1.2.1.1.2"
+    m = t.walk("pidc.udld.walk", "UDLD port status", [u, IFNAME], "5m")
+    rid = t.rule("pidc.udld.discovery", m, "UDLD port discovery", r"""
+var o = W(value), st = C(o, '1.3.6.1.4.1.9.9.118.1.2.1.1.2'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), out = [];
+for (var i in st) if (st[i] !== '4') out.push({'{#UDLD.IFINDEX}': i, '{#UDLD.PORT}': ifn[i] || i});
+return JSON.stringify(out);""")
+    t.proto(rid, "pidc.udld[{#UDLD.IFINDEX}]", "UDLD {#UDLD.PORT}: status", m, [wv(f"{u}.{{#UDLD.IFINDEX}}"), on_change("10m")],
+            value_type=UINT, trends="0", tags=[{"tag": "component", "value": "network"}],
+            valuemapid=t.vm("UDLD status", [(1, "shutdown (unidirectional)"), (2, "indeterminant"), (3, "bidirectional"),
+                                            (4, "not applicable")]))
+    t.tproto(rid, "UDLD {#UDLD.PORT}: link is not bidirectional ({ITEM.LASTVALUE})",
+             f"last({t.k('pidc.udld[{#UDLD.IFINDEX}]')})<3", 4, "network")
+
+
+def cisco_ipsla(t):
+    r = "1.3.6.1.4.1.9.9.42.1.2"
+    m = t.walk("pidc.ipsla.walk", "IP SLA probes", [f"{r}.1.1.3", f"{r}.1.1.4", f"{r}.1.1.5", f"{r}.2.1.2",
+                                                    f"{r}.10.1.1", f"{r}.10.1.2"], "1m")
+    rid = t.rule("pidc.ipsla.discovery", m, "IP SLA probe discovery", r"""
+var o = W(value), typ = C(o, '1.3.6.1.4.1.9.9.42.1.2.1.1.4'), tag = C(o, '1.3.6.1.4.1.9.9.42.1.2.1.1.3'),
+    tgt = C(o, '1.3.6.1.4.1.9.9.42.1.2.2.1.2'), thr = C(o, '1.3.6.1.4.1.9.9.42.1.2.1.1.5'), out = [];
+var types = {1: 'icmp-echo', 2: 'path-echo', 5: 'tcp-connect', 6: 'http', 7: 'dns', 9: 'udp-jitter', 16: 'icmp-jitter'};
+for (var i in typ) out.push({'{#SLA.ID}': i, '{#SLA.TYPE}': types[typ[i]] || ('type ' + typ[i]),
+    '{#SLA.TARGET}': ip(tgt[i]) || '?', '{#SLA.TAG}': tag[i] || '', '{#SLA.THRESHOLD}': thr[i] || '5000'});
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "ipsla"}, {"tag": "sla_target", "value": "{#SLA.TARGET}"}]
+    name = "IP SLA {#SLA.ID} {#SLA.TYPE} to {#SLA.TARGET}"
+    sense = t.vm("rttMonLatestRttOperSense", [(0, "other"), (1, "ok"), (2, "disconnected"), (3, "over threshold"),
+                                              (4, "timeout"), (5, "busy"), (6, "not connected"), (7, "dropped"),
+                                              (8, "sequence error"), (9, "verify error"), (10, "application specific"),
+                                              (11, "DNS server timeout"), (12, "TCP connect timeout"), (13, "HTTP transaction timeout"),
+                                              (14, "DNS query error"), (15, "HTTP error"), (16, "error")])
+    t.proto(rid, "pidc.ipsla.rtt[{#SLA.ID}]", f"{name}: round-trip time", m, [wv(f"{r}.10.1.1.{{#SLA.ID}}"), (MULT, "0.001")],
+            units="s", tags=tags)
+    t.proto(rid, "pidc.ipsla.sense[{#SLA.ID}]", f"{name}: result", m, [wv(f"{r}.10.1.2.{{#SLA.ID}}"), on_change("10m")],
+            value_type=UINT, trends="0", valuemapid=sense, tags=tags)
+    t.tproto(rid, f"{name} failing ({{ITEM.LASTVALUE}})", f"min({t.k('pidc.ipsla.sense[{#SLA.ID}]')},3m)<>1 and "
+             f"max({t.k('pidc.ipsla.sense[{#SLA.ID}]')},3m)<>1", 3, "ipsla",
+             comments="The router's own reachability test to this target is failing.")
+    t.tproto(rid, f"{name}: round-trip time over its threshold ({{#SLA.THRESHOLD}} ms)",
+             f"min({t.k('pidc.ipsla.rtt[{#SLA.ID}]')},5m)*1000>{{#SLA.THRESHOLD}}", 2, "ipsla")
+
+
+def cisco_vrf(t):
+    v = "1.3.6.1.2.1.10.166.11.1"
+    m = t.walk("pidc.vrf.walk", "VRFs", [f"{v}.2.2.1.6", f"{v}.2.2.1.7", f"{v}.3.1.1.3"], "5m")
+    rid = t.rule("pidc.vrf.discovery", m, "VRF discovery", r"""
+var st = C(W(value), '1.3.6.1.2.1.10.166.11.1.2.2.1.6'), out = [];
+for (var i in st) { var b = i.split('.'), n = ''; for (var j = 1; j < b.length; j++) n += String.fromCharCode(parseInt(b[j]));
+    if (!/^Mgmt-(vrf|intf)$/.test(n)) out.push({'{#VRF.INDEX}': i, '{#VRF}': n}); }   // management-port VRF: port unused
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "routing"}, {"tag": "vrf", "value": "{#VRF}"}]
+    t.proto(rid, "pidc.vrf.status[{#VRF.INDEX}]", "VRF {#VRF}: status", m, [wv(f"{v}.2.2.1.6.{{#VRF.INDEX}}"), on_change()],
+            value_type=UINT, trends="0", valuemapid=t.vm("VRF status", [(1, "up"), (2, "down")]), tags=tags)
+    t.proto(rid, "pidc.vrf.ifs[{#VRF.INDEX}]", "VRF {#VRF}: active interfaces", m, [wv(f"{v}.2.2.1.7.{{#VRF.INDEX}}"), on_change()],
+            value_type=UINT, tags=tags)
+    t.proto(rid, "pidc.vrf.routes[{#VRF.INDEX}]", "VRF {#VRF}: routes", m,
+            [wv(f"{v}.3.1.1.3.{{#VRF.INDEX}}"), on_change()], value_type=UINT, tags=tags)
+    t.tproto(rid, "VRF {#VRF} is down", f"last({t.k('pidc.vrf.status[{#VRF.INDEX}]')})=2", 3, "routing")
+
+
+def ip_stats(t):
+    s = "1.3.6.1.2.1.4.31.1.1"
+    m = t.walk("pidc.ipstats.walk", "IP statistics", [f"{s}.4", f"{s}.7", f"{s}.8", f"{s}.13", f"{s}.17", f"{s}.25"], "1m")
+    rid = t.rule("pidc.ipstats.discovery", m, "IP version discovery", r"""
+var r = C(W(value), '1.3.6.1.2.1.4.31.1.1.4'), out = [];
+for (var i in r) out.push({'{#IPVER.INDEX}': i, '{#IPVER}': i === '1' ? 'IPv4' : (i === '2' ? 'IPv6' : 'IP ' + i)});
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "ip"}]
+    for col, key, label in ((4, "in", "packets received"), (13, "fwd", "packets forwarded"), (7, "hdrerr", "header errors"),
+                            (8, "noroute", "dropped, no route"), (17, "indisc", "input discards"), (25, "outdisc", "output discards")):
+        t.proto(rid, f"pidc.ip.{key}[{{#IPVER.INDEX}}]", f"{{#IPVER}}: {label} per second", m,
+                [wv(f"{s}.{col}.{{#IPVER.INDEX}}"), (CPS, ""), on_change()], units="pps", tags=tags)
+
+
+def cisco_poe(t):
+    p = "1.3.6.1.2.1.105.1"
+    m = t.walk("pidc.poe.walk", "PoE", [f"{p}.3.1.1.2", f"{p}.3.1.1.3", f"{p}.3.1.1.4", f"{p}.1.1.1.6"], "5m")
+    poe_std(t, m)
+
+
+def poe_std(t, m):
+    p = "1.3.6.1.2.1.105.1"
+    rid = t.rule("pidc.poe.discovery", m, "PoE power source discovery", r"""
+var st = C(W(value), '1.3.6.1.2.1.105.1.3.1.1.2'), out = [];
+for (var i in st) out.push({'{#PSE}': i});
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "poe"}]
+    t.proto(rid, "pidc.poe.power[{#PSE}]", "PoE {#PSE}: power budget", m, [wv(f"{p}.3.1.1.2.{{#PSE}}"), on_change()],
+            value_type=UINT, units="W", tags=tags)
+    t.proto(rid, "pidc.poe.used[{#PSE}]", "PoE {#PSE}: power used", m, [wv(f"{p}.3.1.1.4.{{#PSE}}")], value_type=UINT,
+            units="W", tags=tags)
+    t.proto(rid, "pidc.poe.pused[{#PSE}]", "PoE {#PSE}: budget used %", None, [], type=CALCULATED, delay="5m", units="%",
+            tags=tags, params="last(//pidc.poe.used[{#PSE}])/last(//pidc.poe.power[{#PSE}])*100")
+    t.tproto(rid, "PoE {#PSE}: power budget over 90% used", f"last({t.k('pidc.poe.pused[{#PSE}]')})>90", 2, "poe",
+             comments="New powered devices (phones, APs, cameras) may not get power.")
+    prid = t.rule("pidc.poe.port.discovery", m, "PoE port discovery", r"""
+var st = C(W(value), '1.3.6.1.2.1.105.1.1.1.6'), out = [];
+for (var i in st) if (st[i] !== '1') out.push({'{#POE.PORT}': i, '{#POE.NAME}': i.replace('.', '/')});
+return JSON.stringify(out);""")
+    t.proto(prid, "pidc.poe.port[{#POE.PORT}]", "PoE port {#POE.NAME}: status", m, [wv(f"{p}.1.1.1.6.{{#POE.PORT}}"), on_change()],
+            value_type=UINT, trends="0", tags=tags,
+            valuemapid=t.vm("pethPsePortDetectionStatus", [(1, "disabled"), (2, "searching"), (3, "delivering power"),
+                                                           (4, "fault"), (5, "test"), (6, "other fault")]))
+    t.tproto(prid, "PoE port {#POE.NAME}: power fault", f"last({t.k('pidc.poe.port[{#POE.PORT}]')})=4 or "
+             f"last({t.k('pidc.poe.port[{#POE.PORT}]')})=6", 2, "poe")
+
+
+# ======================================================================================== ASR only
+BGP_RULE_JS = r"""
+var o = W(value), st = C(o, '1.3.6.1.4.1.9.9.187.1.2.5.1.3'), as = C(o, '1.3.6.1.4.1.9.9.187.1.2.5.1.11'), out = [];
+var isp = {'9498': 'Airtel', '55836': 'Jio', '142470': 'PowerGrid', '140641': 'Sify', '134930': 'AS134930', '137851': 'AS137851'};
+for (var i in st) {
+    var b = i.split('.'), t = b[0], a = b.slice(2), peer;
+    if (t === '1') peer = a.join('.');
+    else { var g = []; for (var j = 0; j < 16; j += 2) g.push((parseInt(a[j]) * 256 + parseInt(a[j + 1])).toString(16));
+           peer = g.join(':').replace(/(^|:)0(:0)+(:|$)/, '::'); }
+    out.push({'{#BGP.INDEX}': i, '{#BGP.PEER}': peer, '{#BGP.AF}': t === '1' ? 'IPv4' : 'IPv6',
+              '{#BGP.AFI}': t === '1' ? '1' : '2', '{#BGP.AS}': as[i] || '?', '{#BGP.NAME}': isp[as[i]] || ('AS' + as[i])});
+}
+return JSON.stringify(out);
+"""
+BGP_ERROR_JS = r"""
+var b = (C(W(value), '1.3.6.1.4.1.9.9.187.1.2.5.1.17')['{#BGP.INDEX}'] || '').trim().split(/\s+/),
+    txt = C(W(value), '1.3.6.1.4.1.9.9.187.1.2.5.1.28')['{#BGP.INDEX}'] || '';
+var c = parseInt(b[0] || '0', 16), s = parseInt(b[1] || '0', 16);
+if (!c) return 'none';
+var n = {1: 'Message header error', 2: 'OPEN message error', 3: 'UPDATE message error', 4: 'Hold timer expired',
+         5: 'Finite state machine error', 6: 'Cease'}[c] || 'Unknown';
+return c + '/' + s + ' ' + n + (txt ? ' (' + txt + ')' : '');
+"""
+
+
+def asr_bgp(t):
+    p, f = "1.3.6.1.4.1.9.9.187.1.2.5.1", "1.3.6.1.4.1.9.9.187.1.2.8.1"
+    m = t.walk("pidc.bgp.walk", "BGP peers (IPv4 + IPv6)", [p, f], "30s")    # whole tables: 15 roots exceed the 512-char OID field
+    rid = t.rule("pidc.bgp.discovery", m, "BGP peer discovery (IPv4 + IPv6)", BGP_RULE_JS)
+    name = "BGP {#BGP.NAME} {#BGP.AF} peer {#BGP.PEER} (AS{#BGP.AS})"
+    tags = [{"tag": "component", "value": "bgp"}, {"tag": "bgp_peer", "value": "{#BGP.PEER}"}, {"tag": "af", "value": "{#BGP.AF}"}]
+    c = lambda col: f"{p}.{col}.{{#BGP.INDEX}}"
+    state = t.vm("BGP session state", [(0, "shutdown"), (1, "idle"), (2, "connect"), (3, "active"), (4, "opensent"),
+                                       (5, "openconfirm"), (6, "established")])
+    t.proto(rid, "pidc.bgp.state[{#BGP.INDEX}]", f"{name}: State", m, [wv(c(3))], value_type=UINT, trends="0",
+            valuemapid=t.vm("BGP4-MIB::bgpPeerState", [(1, "idle"), (2, "connect"), (3, "active"), (4, "opensent"),
+                                                       (5, "openconfirm"), (6, "established")]), tags=tags)
+    t.proto(rid, "pidc.bgp.admin[{#BGP.INDEX}]", f"{name}: Admin status", m, [wv(c(4)), on_change()], value_type=UINT,
+            trends="0", valuemapid=t.vm("BGP4-MIB::bgpPeerAdminStatus", [(1, "shutdown"), (2, "enabled")]), tags=tags)
+    t.proto(rid, "pidc.bgp.session[{#BGP.INDEX}]", f"{name}: Session state", None, [], type=CALCULATED, delay="30s",
+            value_type=UINT, trends="0", valuemapid=state, tags=tags,
+            params="last(//pidc.bgp.state[{#BGP.INDEX}])*(last(//pidc.bgp.admin[{#BGP.INDEX}])=2)",
+            description="BGP state, or 0 = shutdown when the peer is administratively disabled. 6 = established.")
+    t.proto(rid, "pidc.bgp.uptime[{#BGP.INDEX}]", f"{name}: Time in current state", m, [wv(c(19))], value_type=UINT,
+            units="uptime", tags=tags)
+    t.proto(rid, "pidc.bgp.flaps[{#BGP.INDEX}]", f"{name}: Flaps (times established)", m, [wv(c(18)), on_change()],
+            value_type=UINT, tags=tags)
+    t.proto(rid, "pidc.bgp.remoteid[{#BGP.INDEX}]", f"{name}: Remote router ID", m, [wv(c(12)), on_change()], value_type=CHAR, tags=tags)
+    t.proto(rid, "pidc.bgp.lasterror[{#BGP.INDEX}]", f"{name}: Last error", m, [(JS, js(BGP_ERROR_JS)), on_change()],
+            value_type=CHAR, tags=tags)
+    for col, key, label in ((13, "updates.in", "UPDATEs received per minute"), (14, "updates.out", "UPDATEs sent per minute"),
+                            (15, "msgs.in", "Messages received per minute"), (16, "msgs.out", "Messages sent per minute")):
+        t.proto(rid, f"pidc.bgp.{key}[{{#BGP.INDEX}}]", f"{name}: {label}", m, [wv(c(col)), (CPS, ""), (MULT, "60")],
+                units="/min", tags=tags)
+    t.proto(rid, "pidc.bgp.update.elapsed[{#BGP.INDEX}]", f"{name}: Time since last UPDATE", m, [wv(c(27))], value_type=UINT,
+            units="uptime", tags=tags)
+    t.proto(rid, "pidc.bgp.holdtime[{#BGP.INDEX}]", f"{name}: Hold time (negotiated)", m, [wv(c(21)), on_change()],
+            value_type=UINT, units="s", tags=tags)
+    for col, key, label in ((1, "accepted", "Prefixes accepted"), (2, "denied", "Prefixes denied by policy"),
+                            (6, "advertised", "Prefixes advertised"), (7, "suppressed", "Prefixes suppressed"),
+                            (8, "withdrawn", "Prefixes withdrawn")):
+        t.proto(rid, f"pidc.bgp.pfx.{key}[{{#BGP.INDEX}}]", f"{name}: {label}", m,
+                [(JS, js(f"var v = W(value)['{f}.{col}.{{#BGP.INDEX}}.{{#BGP.AFI}}.1']; return v === undefined ? 0 : parseInt(v);")),
+                 on_change()], value_type=UINT, tags=tags)
+    k = lambda key: t.k(f"pidc.bgp.{key}[{{#BGP.INDEX}}]")
+    t.tproto(rid, f"{name}: BGP session DOWN ({{ITEM.LASTVALUE1}})",
+             f"last({k('state')})<>6 and last({k('admin')})=2", 4, "bgp", recovery_mode=1,
+             recovery_expression=f"last({k('state')})=6 or last({k('admin')})=1",
+             comments="The session is enabled but not established: routes from this peer are withdrawn.")
+    t.tproto(rid, f"{name}: BGP session flapped (re-established in the last 10 min)",
+             f"last({k('flaps')})-last({k('flaps')},#1:now-10m)>0", 3, "bgp")
+    t.tproto(rid, f"{name}: established but no prefixes accepted", f"max({k('pfx.accepted')},5m)=0 and last({k('state')})=6",
+             3, "bgp")
+    # The older BGP4-MIB discovery (IPv4 only, add_routers.py) keeps its items for history; its alerts would
+    # duplicate these, so its trigger prototypes are deleted (disabling a prototype leaves discovered triggers active).
+    old = t.rules.get("bgp.peer.discovery")
+    if old:
+        tps = t.z.call("triggerprototype.get", {"discoveryids": old, "output": ["triggerid"]})
+        if tps:
+            t.z.call("triggerprototype.delete", [tp["triggerid"] for tp in tps])
+
+
+def asr_vrrp(t):
+    v = "1.3.6.1.2.1.207.1"
+    m = t.walk("pidc.vrrp.walk", "VRRP groups", [f"{v}.1.1.1.3", f"{v}.1.1.1.6", f"{v}.1.1.1.7", f"{v}.2.5.1.1", IFNAME], "30s")
+    rid = t.rule("pidc.vrrp.discovery", m, "VRRP group discovery", r"""
+var o = W(value), st = C(o, '1.3.6.1.2.1.207.1.1.1.1.6'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), out = [];
+for (var i in st) { var b = i.split('.');
+    out.push({'{#VRRP.INDEX}': i, '{#VRRP.ID}': b[1], '{#VRRP.AF}': b[2] === '1' ? 'IPv4' : 'IPv6', '{#VRRP.IF}': ifn[b[0]] || b[0]}); }
+return JSON.stringify(out);""")
+    name = "VRRP group {#VRRP.ID} {#VRRP.AF} on {#VRRP.IF}"
+    tags = [{"tag": "component", "value": "vrrp"}, {"tag": "vrrp_group", "value": "{#VRRP.ID}"}]
+    t.proto(rid, "pidc.vrrp.state[{#VRRP.INDEX}]", f"{name}: state", m, [wv(f"{v}.1.1.1.6.{{#VRRP.INDEX}}"), on_change("10m")],
+            value_type=UINT, trends="0", tags=tags,
+            valuemapid=t.vm("VRRP state", [(1, "initialize"), (2, "backup"), (3, "master")]))
+    t.proto(rid, "pidc.vrrp.priority[{#VRRP.INDEX}]", f"{name}: priority", m, [wv(f"{v}.1.1.1.7.{{#VRRP.INDEX}}"), on_change()],
+            value_type=UINT, tags=tags)
+    t.proto(rid, "pidc.vrrp.master[{#VRRP.INDEX}]", f"{name}: master address", m, [wv(f"{v}.1.1.1.3.{{#VRRP.INDEX}}"), on_change()],
+            value_type=CHAR, tags=tags)
+    t.proto(rid, "pidc.vrrp.transitions[{#VRRP.INDEX}]", f"{name}: times became master", m,
+            [wv(f"{v}.2.5.1.1.{{#VRRP.INDEX}}"), on_change()], value_type=UINT, tags=tags)
+    k = t.k("pidc.vrrp.state[{#VRRP.INDEX}]")
+    t.tproto(rid, f"{name}: changed state to {{ITEM.LASTVALUE}}", f"last({k})<>last({k},#2)", 3, "vrrp",
+             comments="The gateway role moved between the routers (failover or failback).")
+    t.tproto(rid, f"{name}: stuck in initialize (interface down?)", f"max({k},5m)=1", 3, "vrrp")
+
+
+QOS_RULE_JS = r"""
+var o = W(value), dir = C(o, '1.3.6.1.4.1.9.9.166.1.1.1.1.3'), pif = C(o, '1.3.6.1.4.1.9.9.166.1.1.1.1.4'),
+    cfg = C(o, '1.3.6.1.4.1.9.9.166.1.5.1.1.2'), typ = C(o, '1.3.6.1.4.1.9.9.166.1.5.1.1.3'),
+    par = C(o, '1.3.6.1.4.1.9.9.166.1.5.1.1.4'), cm = C(o, '1.3.6.1.4.1.9.9.166.1.7.1.1.1'),
+    pm = C(o, '1.3.6.1.4.1.9.9.166.1.6.1.1.1'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), out = [];
+for (var k in typ) {
+    if (typ[k] !== '2') continue;                         // class-map objects
+    var b = k.split('.'), pol = b[0], parent = par[k], pname = '';
+    if (parent && typ[pol + '.' + parent] === '1') pname = pm[cfg[pol + '.' + parent]] || '';
+    out.push({'{#QOS.INDEX}': k, '{#QOS.CLASS}': cm[cfg[k]] || ('class ' + b[1]), '{#QOS.POLICY}': pname,
+              '{#QOS.IF}': ifn[pif[pol]] || pif[pol], '{#QOS.DIR}': dir[pol] === '1' ? 'in' : 'out'});
+}
+return JSON.stringify(out);
+"""
+
+
+def asr_qos(t):
+    q = "1.3.6.1.4.1.9.9.166.1"
+    cfgw = t.walk("pidc.qos.cfg.walk", "QoS configuration", [f"{q}.1.1.1.3", f"{q}.1.1.1.4", f"{q}.5.1.1.2", f"{q}.5.1.1.3",
+                                                             f"{q}.5.1.1.4", f"{q}.7.1.1.1", f"{q}.6.1.1.1", IFNAME], "1h")
+    stats = t.walk("pidc.qos.stats.walk", "QoS class rates", [f"{q}.15.1.1.7", f"{q}.15.1.1.11", f"{q}.15.1.1.18"], "1m")
+    rid = t.rule("pidc.qos.discovery", cfgw, "QoS class discovery", QOS_RULE_JS)
+    name = "QoS {#QOS.IF} {#QOS.DIR} {#QOS.POLICY} class {#QOS.CLASS}"
+    tags = [{"tag": "component", "value": "qos"}, {"tag": "qos_class", "value": "{#QOS.CLASS}"}, {"tag": "interface", "value": "{#QOS.IF}"}]
+    for col, key, label in ((7, "offered", "offered (before policy)"), (11, "delivered", "delivered (after policy)"),
+                            (18, "dropped", "dropped")):
+        t.proto(rid, f"pidc.qos.{key}[{{#QOS.INDEX}}]", f"{name}: {label}", stats,
+                [wv(f"{q}.15.1.1.{col}.{{#QOS.INDEX}}"), on_change()], units="bps", tags=tags)
+
+
+def asr_alarms(t):
+    a = "1.3.6.1.4.1.9.9.138.1.2"
+    m = t.walk("pidc.alarm.walk", "entity alarm counts", [f"{a}.1", f"{a}.2", f"{a}.3"], "1m")
+    tags = [{"tag": "component", "value": "hardware"}]
+    for col, key, label, prio in ((1, "critical", "critical", 4), (2, "major", "major", 3), (3, "minor", "minor", 2)):
+        t.dep(m, f"pidc.alarm.{key}", f"Hardware alarms: {label}", [wv(f"{a}.{col}.0"), on_change()], value_type=UINT, tags=tags)
+        t.trigger(f"New {label} hardware alarm (now {{ITEM.LASTVALUE}})",
+                  f"last({t.k(f'pidc.alarm.{key}')})>last({t.k(f'pidc.alarm.{key}')},#1:now-10m)", prio, "hardware",
+                  comments="The count rose in the last 10 minutes. Standing alarms (unused ports / empty optic slots) do not alert; "
+                           "see 'show facility-alarm status' on the router.")
+
+
+# ======================================================================================== other vendors
+ARISTA_DOM_RULE_JS = r"""
+var o = W(value), typ = C(o, '1.3.6.1.2.1.99.1.1.1.1'), name = C(o, '1.3.6.1.2.1.47.1.1.1.1.2'), out = [],
+    scale = C(o, '1.3.6.1.2.1.99.1.1.1.2'), prec = C(o, '1.3.6.1.2.1.99.1.1.1.3'),
+    lw = C(o, '1.3.6.1.4.1.30065.3.12.1.1.1.1'), lc = C(o, '1.3.6.1.4.1.30065.3.12.1.1.1.2');
+function dbm(v, i) { var w = parseInt(v) * Math.pow(10, 3 * (parseInt(scale[i]) - 9)) / Math.pow(10, parseInt(prec[i]));
+    return w > 0 ? Math.round(100 * 10 * Math.log(w * 1000) / Math.LN10) / 100 : -40; }
+for (var i in typ) {
+    var n = name[i] || '', m = n.match(/DOM (RX|TX) Power Sensor for (\S+)/);
+    if (typ[i] !== '6' || !m || parseInt(lc[i]) <= -1000000000) continue;   // no thresholds = no optic fitted
+    out.push({'{#DOM.INDEX}': i, '{#DOM.NAME}': m[2] + ' ' + m[1].toLowerCase(), '{#DOM.KIND}': m[1].toLowerCase(),
+              '{#DOM.LOWARN}': dbm(lw[i], i), '{#DOM.LOCRIT}': dbm(lc[i], i)});
+}
+return JSON.stringify(ports(o, out));
+"""
+
+
+def arista_dom(t):
+    m = t.walk("pidc.dom.walk", "transceiver power sensors", ["1.3.6.1.2.1.99.1.1.1.1", "1.3.6.1.2.1.99.1.1.1.2",
+                                                              "1.3.6.1.2.1.99.1.1.1.3", "1.3.6.1.2.1.99.1.1.1.4",
+                                                              "1.3.6.1.2.1.47.1.1.1.1.2", "1.3.6.1.4.1.30065.3.12.1.1.1.1",
+                                                              "1.3.6.1.4.1.30065.3.12.1.1.1.2", IFNAME, IFOPER], "1m")
+    rid = t.rule("pidc.dom.discovery", m, "Transceiver optical power discovery", ARISTA_DOM_RULE_JS)
+    t.proto(rid, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME} power", m, [(JS, js(
+        "var o = W(value), i = '{#DOM.INDEX}', v = o['1.3.6.1.2.1.99.1.1.1.4.' + i];"
+        "if (v === undefined) throw 'no sensor';"
+        "var w = parseInt(v) * Math.pow(10, 3 * (parseInt(o['1.3.6.1.2.1.99.1.1.1.2.' + i]) - 9)) / Math.pow(10, parseInt(o['1.3.6.1.2.1.99.1.1.1.3.' + i]));"
+        "return w > 0 ? 10 * Math.log(w * 1000) / Math.LN10 : -40;"))],
+        units="dBm", tags=[{"tag": "component", "value": "optics"}, {"tag": "optic", "value": "{#DOM.KIND}"}])
+    optic_triggers(t, rid, m, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME}")
+
+
+def hpe_dom(t):
+    x = "1.3.6.1.4.1.25506.2.70.1.1.1"
+    m = t.walk("pidc.dom.walk", "transceivers", [f"{x}.{c}" for c in (1, 9, 12, 17, 33, 31, 37, 35)] + [IFNAME, IFOPER], "1m")
+    rid = t.rule("pidc.dom.discovery", m, "Transceiver optical power discovery", r"""
+var o = W(value), rx = C(o, '1.3.6.1.4.1.25506.2.70.1.1.1.12'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), out = [];
+function d(uw10) { var w = parseInt(uw10) / 10000; return w > 0 ? Math.round(1000 * Math.log(w) / Math.LN10) / 100 : -40; }
+for (var i in rx) {
+    if (rx[i] === '2147483647') continue;              // copper / stacking module without DOM
+    var p = ifn[i] || i;
+    out.push({'{#DOM.INDEX}': i + '.rx', '{#DOM.IF}': i, '{#DOM.COL}': '12', '{#DOM.NAME}': p + ' rx', '{#DOM.KIND}': 'rx',
+              '{#DOM.LOWARN}': d(o['1.3.6.1.4.1.25506.2.70.1.1.1.37.' + i]), '{#DOM.LOCRIT}': d(o['1.3.6.1.4.1.25506.2.70.1.1.1.35.' + i])});
+    out.push({'{#DOM.INDEX}': i + '.tx', '{#DOM.IF}': i, '{#DOM.COL}': '9', '{#DOM.NAME}': p + ' tx', '{#DOM.KIND}': 'tx',
+              '{#DOM.LOWARN}': d(o['1.3.6.1.4.1.25506.2.70.1.1.1.33.' + i]), '{#DOM.LOCRIT}': d(o['1.3.6.1.4.1.25506.2.70.1.1.1.31.' + i])});
+}
+return JSON.stringify(ports(o, out));""")
+    t.proto(rid, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME} power", m,
+            [wv(f"{x}.{{#DOM.COL}}.{{#DOM.IF}}"), (MULT, "0.01")], units="dBm",
+            tags=[{"tag": "component", "value": "optics"}, {"tag": "optic", "value": "{#DOM.KIND}"}])
+    optic_triggers(t, rid, m, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME}")
+
+
+def huawei_dom(t):
+    x = "1.3.6.1.4.1.2011.5.25.31.1.1.3.1"
+    m = t.walk("pidc.dom.walk", "transceivers", [f"{x}.8", f"{x}.9", "1.3.6.1.2.1.47.1.1.1.1.7", IFNAME, IFOPER], "1m")
+    # This VRP release reports power in microwatts (e.g. 306 = -5.1 dBm) although the MIB text says 0.01 dBm.
+    rid = t.rule("pidc.dom.discovery", m, "Transceiver optical power discovery", r"""
+var o = W(value), rx = C(o, '1.3.6.1.4.1.2011.5.25.31.1.1.3.1.8'), name = C(o, '1.3.6.1.2.1.47.1.1.1.1.7'), out = [];
+for (var i in rx) {
+    if (parseInt(rx[i]) < 0) continue;                // -1 = no optic / no DOM
+    var n = (name[i] || i).replace(/\s+/g, ' ');
+    out.push({'{#DOM.INDEX}': i + '.rx', '{#DOM.ENT}': i, '{#DOM.COL}': '8', '{#DOM.NAME}': n + ' rx', '{#DOM.KIND}': 'rx',
+              '{#DOM.LOWARN}': -20, '{#DOM.LOCRIT}': -23});
+    out.push({'{#DOM.INDEX}': i + '.tx', '{#DOM.ENT}': i, '{#DOM.COL}': '9', '{#DOM.NAME}': n + ' tx', '{#DOM.KIND}': 'tx',
+              '{#DOM.LOWARN}': -12, '{#DOM.LOCRIT}': -15});
+}
+return JSON.stringify(ports(o, out));""")
+    t.proto(rid, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME} power", m, [(JS, js(
+        "var v = W(value)['1.3.6.1.4.1.2011.5.25.31.1.1.3.1.{#DOM.COL}.{#DOM.ENT}']; if (v === undefined) throw 'no optic';"
+        "v = parseInt(v); return v > 0 ? 10 * Math.log(v / 1000) / Math.LN10 : -40;"))],
+        units="dBm", tags=[{"tag": "component", "value": "optics"}, {"tag": "optic", "value": "{#DOM.KIND}"}])
+    optic_triggers(t, rid, m, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME}")
+
+
+def juniper_dom(t):
+    x = "1.3.6.1.4.1.2636.3.60.1.1.1.1"
+    m = t.walk("pidc.dom.walk", "transceivers", [f"{x}.{c}" for c in (5, 7, 10, 12, 18, 20)] + [IFNAME, IFOPER], "1m")
+    rid = t.rule("pidc.dom.discovery", m, "Transceiver optical power discovery", r"""
+var o = W(value), rx = C(o, '1.3.6.1.4.1.2636.3.60.1.1.1.1.5'), ifn = C(o, '1.3.6.1.2.1.31.1.1.1.1'), out = [],
+    b = '1.3.6.1.4.1.2636.3.60.1.1.1.1.';
+function th(c, i) { var v = parseInt(o[b + c + '.' + i]); return isNaN(v) ? -40 : v / 100; }
+for (var i in rx) { var p = ifn[i] || i;
+    out.push({'{#DOM.INDEX}': i + '.rx', '{#DOM.IF}': i, '{#DOM.COL}': '5', '{#DOM.NAME}': p + ' rx', '{#DOM.KIND}': 'rx',
+              '{#DOM.LOWARN}': th(12, i), '{#DOM.LOCRIT}': th(10, i)});
+    out.push({'{#DOM.INDEX}': i + '.tx', '{#DOM.IF}': i, '{#DOM.COL}': '7', '{#DOM.NAME}': p + ' tx', '{#DOM.KIND}': 'tx',
+              '{#DOM.LOWARN}': th(20, i), '{#DOM.LOCRIT}': th(18, i)}); }
+return JSON.stringify(ports(o, out));""")
+    t.proto(rid, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME} power", m,
+            [wv(f"{x}.{{#DOM.COL}}.{{#DOM.IF}}"), (MULT, "0.01")], units="dBm",
+            tags=[{"tag": "component", "value": "optics"}, {"tag": "optic", "value": "{#DOM.KIND}"}])
+    optic_triggers(t, rid, m, "pidc.dom.dbm[{#DOM.INDEX}]", "Optics {#DOM.NAME}")
+
+
+def hpe_irf(t):
+    s = "1.3.6.1.4.1.25506.2.91"
+    m = t.walk("pidc.irf.walk", "IRF", [f"{s}.1.2", f"{s}.1.7", f"{s}.2.1.1", f"{s}.4.1.3", f"{s}.4.1.4"], "1m")
+    tags = [{"tag": "component", "value": "stack"}]
+    t.dep(m, "pidc.irf.members", "IRF members", [wv(f"{s}.1.2.0")], value_type=UINT, tags=tags)
+    t.dep(m, "pidc.irf.topology", "IRF topology", [wv(f"{s}.1.7.0"), on_change()], value_type=UINT, trends="0", tags=tags,
+          valuemapid=t.vm("hh3cStackTopology", [(1, "chain (not redundant)"), (2, "ring")]))
+    t.trigger("IRF lost a member (now {ITEM.LASTVALUE})", f"last({t.k('pidc.irf.members')})<max({t.k('pidc.irf.members')},1h:now-5m)",
+              4, "stack")
+    t.trigger("IRF topology is a chain, not a ring (one IRF link down)",
+              f"last({t.k('pidc.irf.topology')})=1 and last({t.k('pidc.irf.members')})>2", 3, "stack")
+    rid = t.rule("pidc.irf.port.discovery", m, "IRF port discovery", r"""
+var st = C(W(value), '1.3.6.1.4.1.25506.2.91.4.1.3'), out = [];
+for (var i in st) { var b = i.split('.'); out.push({'{#IRF.INDEX}': i, '{#IRF.PORT}': 'member ' + b[0] + ' IRF port ' + b[1]}); }
+return JSON.stringify(out);""")
+    t.proto(rid, "pidc.irf.port[{#IRF.INDEX}]", "IRF {#IRF.PORT}: status", m, [wv(f"{s}.4.1.3.{{#IRF.INDEX}}"), on_change("10m")],
+            value_type=UINT, trends="0", tags=tags, valuemapid=t.vm("hh3cStackPortStatus", [(1, "up"), (2, "down"), (3, "silent")]))
+    t.tproto(rid, "IRF {#IRF.PORT} is down", f"last({t.k('pidc.irf.port[{#IRF.INDEX}]')})<>1", 3, "stack")
+
+
+def juniper_vc(t):
+    v = "1.3.6.1.4.1.2636.3.40.1.4.1"
+    m = t.walk("pidc.vc.walk", "Virtual Chassis", [f"{v}.1.1.3", f"{v}.1.1.7", f"{v}.2.1.4"], "1m")
+    tags = [{"tag": "component", "value": "stack"}]
+    rid = t.rule("pidc.vc.member.discovery", m, "Virtual Chassis member discovery", r"""
+var r = C(W(value), '1.3.6.1.4.1.2636.3.40.1.4.1.1.1.3'), out = [];
+for (var i in r) out.push({'{#VC.MEMBER}': i});
+return JSON.stringify(out);""")
+    t.proto(rid, "pidc.vc.role[{#VC.MEMBER}]", "Virtual Chassis member {#VC.MEMBER}: role", m,
+            [wv(f"{v}.1.1.3.{{#VC.MEMBER}}"), on_change()], value_type=UINT, trends="0", tags=tags,
+            valuemapid=t.vm("jnxVirtualChassisMemberRole", [(1, "master"), (2, "backup"), (3, "linecard")]))
+    t.proto(rid, "pidc.vc.uptime[{#VC.MEMBER}]", "Virtual Chassis member {#VC.MEMBER}: uptime", m,
+            [wv(f"{v}.1.1.7.{{#VC.MEMBER}}")], value_type=UINT, units="uptime", tags=tags)
+    t.tproto(rid, "Virtual Chassis member {#VC.MEMBER} changed role to {ITEM.LASTVALUE}",
+             f"last({t.k('pidc.vc.role[{#VC.MEMBER}]')})<>last({t.k('pidc.vc.role[{#VC.MEMBER}]')},#2)", 3, "stack")
+    t.tproto(rid, "Virtual Chassis member {#VC.MEMBER} restarted", f"last({t.k('pidc.vc.uptime[{#VC.MEMBER}]')})<600", 3, "stack")
+    t.dep(m, "pidc.vc.members", "Virtual Chassis members", [(JS, js(
+        "var n = 0, r = C(W(value), '1.3.6.1.4.1.2636.3.40.1.4.1.1.1.3'); for (var k in r) n++; return n;"))],
+        value_type=UINT, tags=tags)
+    t.trigger("Virtual Chassis lost a member (now {ITEM.LASTVALUE})",
+              f"last({t.k('pidc.vc.members')})<max({t.k('pidc.vc.members')},1h:now-5m)", 4, "stack")
+    prid = t.rule("pidc.vc.port.discovery", m, "Virtual Chassis port discovery", r"""
+var st = C(W(value), '1.3.6.1.4.1.2636.3.40.1.4.1.2.1.4'), out = [];
+for (var i in st) { var b = i.split('.'), n = ''; for (var j = 2; j < b.length; j++) n += String.fromCharCode(parseInt(b[j]));
+    out.push({'{#VCP.INDEX}': i, '{#VCP}': 'member ' + b[0] + ' ' + n}); }
+return JSON.stringify(out);""")
+    t.proto(prid, "pidc.vc.port[{#VCP.INDEX}]", "Virtual Chassis port {#VCP}: status", m, [wv(f"{v}.2.1.4.{{#VCP.INDEX}}"), on_change("10m")],
+            value_type=UINT, trends="0", tags=tags, valuemapid=t.vm("jnxVirtualChassisPortOperStatus", [(1, "up"), (2, "down"), (3, "unknown")]))
+    t.tproto(prid, "Virtual Chassis port {#VCP} is down", f"last({t.k('pidc.vc.port[{#VCP.INDEX}]')})=2", 3, "stack")
+
+
+def juniper_config(t):
+    c = "1.3.6.1.4.1.2636.3.18.1"
+    m = t.walk("pidc.jcfg.walk", "configuration changes", [f"{c}.1", f"{c}.5"], "5m")
+    tags = [{"tag": "component", "value": "config"}]
+    t.dep(m, "pidc.jcfg.index", "Config: commit counter", [wv(f"{c}.1.0"), on_change("1d")], value_type=UINT, trends="0", tags=tags)
+    t.dep(m, "pidc.jcfg.user", "Config: last committed by", [wv(f"{c}.5.0"), on_change("1d")], value_type=CHAR, tags=tags)
+    t.trigger("Config: configuration committed", f"last({t.k('pidc.jcfg.index')})<>last({t.k('pidc.jcfg.index')},#2)", 1, "config")
+
+
+def juniper_storage(t):
+    s = "1.3.6.1.2.1.25.2.3.1"
+    m = t.walk("pidc.storage.walk", "storage", [f"{s}.2", f"{s}.3", f"{s}.4", f"{s}.5", f"{s}.6"], "15m")
+    rid = t.rule("pidc.storage.discovery", m, "Disk / flash discovery", r"""
+var o = W(value), typ = C(o, '1.3.6.1.2.1.25.2.3.1.2'), d = C(o, '1.3.6.1.2.1.25.2.3.1.3'), sz = C(o, '1.3.6.1.2.1.25.2.3.1.5'), out = [];
+// skip read-only package images (/dev/mdN[.uzip], always 100%), devfs and the web-UI jail mounts
+for (var i in typ) if (/25\.2\.1\.(4|9)$/.test(typ[i]) && parseInt(sz[i]) > 0 &&
+                      !/^(\/dev\/md\d|devfs|procfs)|mounted on: \S*\/jail\//.test(d[i])) out.push({'{#FS.INDEX}': i, '{#FS}': d[i]});
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "storage"}]
+    t.proto(rid, "pidc.fs.pused[{#FS.INDEX}]", "Storage {#FS}: used %", m, [(JS, js(
+        "var o = W(value), u = parseFloat(o['1.3.6.1.2.1.25.2.3.1.6.{#FS.INDEX}']), s = parseFloat(o['1.3.6.1.2.1.25.2.3.1.5.{#FS.INDEX}']);"
+        "if (!s) throw 'no storage'; return u / s * 100;"))], units="%", tags=tags)
+    t.tproto(rid, "Storage {#FS} is over 90% full", f"last({t.k('pidc.fs.pused[{#FS.INDEX}]')})>90", 2, "storage")
+
+
+def huawei_stack(t):
+    s = "1.3.6.1.4.1.2011.5.25.183.1"
+    m = t.walk("pidc.hwstack.walk", "iStack", [f"{s}.5", f"{s}.20.1.3", f"{s}.21.1.3", f"{s}.21.1.5"], "1m")
+    tags = [{"tag": "component", "value": "stack"}]
+    rid = t.rule("pidc.hwstack.discovery", m, "iStack member discovery", r"""
+var o = W(value), stack = o['1.3.6.1.4.1.2011.5.25.183.1.5.0'], r = C(o, '1.3.6.1.4.1.2011.5.25.183.1.20.1.3'), out = [];
+if (stack === '1') for (var i in r) out.push({'{#ISTACK.MEMBER}': i});
+return JSON.stringify(out);""")
+    t.proto(rid, "pidc.hwstack.role[{#ISTACK.MEMBER}]", "iStack member {#ISTACK.MEMBER}: role", m,
+            [wv(f"{s}.20.1.3.{{#ISTACK.MEMBER}}"), on_change()], value_type=UINT, trends="0", tags=tags,
+            valuemapid=t.vm("hwMemberStackRole", [(1, "master"), (2, "standby"), (3, "slave")]))
+    t.tproto(rid, "iStack member {#ISTACK.MEMBER} changed role to {ITEM.LASTVALUE}",
+             f"last({t.k('pidc.hwstack.role[{#ISTACK.MEMBER}]')})<>last({t.k('pidc.hwstack.role[{#ISTACK.MEMBER}]')},#2)", 3, "stack")
+    prid = t.rule("pidc.hwstack.port.discovery", m, "iStack port discovery", r"""
+var o = W(value), stack = o['1.3.6.1.4.1.2011.5.25.183.1.5.0'], st = C(o, '1.3.6.1.4.1.2011.5.25.183.1.21.1.5'),
+    nm = C(o, '1.3.6.1.4.1.2011.5.25.183.1.21.1.3'), out = [];
+if (stack === '1') for (var i in st) out.push({'{#ISTACKP.INDEX}': i, '{#ISTACKP}': 'member ' + i.split('.')[0] + ' ' + (nm[i] || i)});
+return JSON.stringify(out);""")
+    t.proto(prid, "pidc.hwstack.port[{#ISTACKP.INDEX}]", "iStack port {#ISTACKP}: status", m,
+            [wv(f"{s}.21.1.5.{{#ISTACKP.INDEX}}"), on_change("10m")], value_type=UINT, trends="0", tags=tags,
+            valuemapid=t.vm("hwStackPortStatus", [(1, "up"), (2, "down")]))
+    # A chain (not ring) stack always has unused stack ports, so alert only when a port that was up goes down.
+    k = t.k('pidc.hwstack.port[{#ISTACKP.INDEX}]')
+    t.tproto(prid, "iStack port {#ISTACKP} went down", f"last({k})=2 and min({k},1d)=1", 3, "stack",
+             recovery_mode=1, recovery_expression=f"last({k})=1")
+
+
+def huawei_poe(t):
+    p = "1.3.6.1.4.1.2011.5.25.195"
+    m = t.walk("pidc.hwpoe.walk", "PoE", [f"{p}.2.1.2", f"{p}.2.1.5"], "5m")
+    rid = t.rule("pidc.hwpoe.discovery", m, "PoE slot discovery", r"""
+var o = W(value), mx = C(o, '1.3.6.1.4.1.2011.5.25.195.2.1.2'), out = [];
+for (var i in mx) if (parseInt(mx[i]) > 0) out.push({'{#PSE}': i});
+return JSON.stringify(out);""")
+    tags = [{"tag": "component", "value": "poe"}]
+    t.proto(rid, "pidc.hwpoe.max[{#PSE}]", "PoE slot {#PSE}: power budget", m, [wv(f"{p}.2.1.2.{{#PSE}}"), (MULT, "0.001"), on_change()],
+            units="W", tags=tags)
+    t.proto(rid, "pidc.hwpoe.used[{#PSE}]", "PoE slot {#PSE}: power used", m, [wv(f"{p}.2.1.5.{{#PSE}}"), (MULT, "0.001"), on_change()],
+            units="W", tags=tags)
+    t.proto(rid, "pidc.hwpoe.pused[{#PSE}]", "PoE slot {#PSE}: budget used %", None, [], type=CALCULATED, delay="5m", units="%",
+            tags=tags, params="last(//pidc.hwpoe.used[{#PSE}])/last(//pidc.hwpoe.max[{#PSE}])*100")
+    t.tproto(rid, "PoE slot {#PSE}: power budget over 90% used", f"last({t.k('pidc.hwpoe.pused[{#PSE}]')})>90", 2, "poe")
+
+
+def huawei_config(t):
+    m = t.walk("pidc.hwcfg.walk", "configuration changes", ["1.3.6.1.4.1.2011.5.25.191.1.1"], "5m")
+    t.dep(m, "pidc.hwcfg.seq", "Config: change counter", [wv("1.3.6.1.4.1.2011.5.25.191.1.1.0"), on_change("1d")],
+          value_type=UINT, trends="0", tags=[{"tag": "component", "value": "config"}])
+    t.trigger("Config: configuration changed", f"last({t.k('pidc.hwcfg.seq')})<>last({t.k('pidc.hwcfg.seq')},#2)", 1, "config")
+
+
+FEATURES = {
+    AR: [ports, lldp, lacp, arista_dom],
+    CAT: [ports, lldp, cdp, lacp, stp, cisco_config, cisco_stack, cisco_dom, cisco_flash, cisco_ntp, cisco_udld,
+          cisco_ipsla, cisco_vrf, ip_stats, cisco_poe],
+    ASR: [ports, lacp, cisco_config, cisco_flash, cisco_ntp, cisco_ipsla, cisco_vrf, ip_stats,    # ASR920 has no PoE (bogus table)
+          asr_bgp, asr_vrrp, asr_qos, asr_alarms],
+    HPE: [ports, lldp, lacp, stp, hpe_dom, hpe_irf, ip_stats],
+    HW: [ports, stp, huawei_dom, huawei_stack, huawei_poe, huawei_config],
+    JNX: [ports, lldp, lacp, stp, juniper_dom, juniper_vc, juniper_config, juniper_storage],
+    SONICWALL: [ports],   # template created by add_firewalls.py (run that first)
+}
+
+
+def main():
+    z = base.Zabbix()
+    only = sys.argv[1:]
+    for name, feats in FEATURES.items():
+        t = Template(z, name)
+        for feat in feats:
+            if not only or feat.__name__ in only:
+                feat(t)
+        print(f"{name}: " + ", ".join(f"{v} new {k}" for k, v in t.n.items()))
+
+
+if __name__ == "__main__":
+    main()

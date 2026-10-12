@@ -5,7 +5,7 @@
 - Every template linked to a host, plus every "... - PIDC" template, that sets either macro itself (stock
   templates ship 90) is set to the same value - template macros override global ones.
 - The A10's own macros {$A10.CPU.HIGH} / {$A10.MEM.HIGH} (add_health_and_drop_alerts.py).
-Host-level macros are left alone: they are deliberate per-device exceptions (e.g. 100G_Leaf_SW-1/2 memory 99 %).
+Host-level macros are left alone: they are deliberate per-device exceptions (e.g. 25G_Leaf_SW-1/2 memory 99 %).
 Run hourly from /etc/cron.d/zabbix-default-thresholds so new devices and templates pick it up. Prints only changes.
 """
 import setup_isp_links as base

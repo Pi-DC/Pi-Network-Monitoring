@@ -8,20 +8,81 @@
   itself (caches, memory, disk) or on any host in
   any host in the switch/router groups (WAN Switches, PiSB Cloud Switches, WAN Routers, Pi VMware Fabric), plus recovery.
   Lower severities (packet loss / latency / 80% utilisation warnings) are left on the dashboards only,
-  so Jio's ICMP rate-limiting doesn't flood the inbox.
+  so Jio's ICMP rate-limiting doesn't flood the inbox. Disk-space problems are left out of it (see below).
+- Creates the "Disk space alerts" action (2026-10-12, user request): disk space low / critically low and inodes
+  running out on the monitoring server, and the backup NFS share filling up - every severity (80 % warning
+  included) plus recovery, e-mailed to DISK_RECIPIENTS only, through the frontend-less user DISK_USER.
+Both actions also mail the read-only monitoring user (setup_monitoring_user.py, monitoring@) when it exists.
 Re-runnable.
 """
+import secrets
+
 import setup_isp_links as base
+import setup_monitoring_user
 
 SENDER = "alerts@pidatacenters.com"
 RECIPIENTS = ["compute@pidatacenters.com", "network@pidatacenters.com"]
 ACTION = "ISP link alerts"
 MIN_SEVERITY = "3"   # 3 = Average; 4 = High; 5 = Disaster
 SWITCH_GROUPS = ["WAN Switches", "PiSB Cloud Switches", "WAN Routers", "Pi VMware Fabric", "Pi MMR Cross Connect Fabric",
-                 "Pi DH Cross Connect Fabric", "Pi 1G Colo Fabric"]
+                 "Pi DH Cross Connect Fabric", "Pi 1G Colo Fabric", "H1 Colo Fabric", "1G Prod Fabric",
+                 "Admin Core Fabric", "Pi Firewall Fabric"]
 # The monitoring server itself: cache-usage / low-memory / VM memory and disk problems, so a full cache or memory
 # shortage is mailed before it can crash Zabbix (added 2026-10-09).
 SELF_HOST = "Zabbix server"
+DISK_ACTION = "Disk space alerts"
+DISK_RECIPIENTS = ["compute@pidatacenters.com"]
+DISK_USER, DISK_USER_GROUP = "disk-alerts", "Disk alert recipients"
+# trigger names (substrings) counted as disk alerts: "FS [/]: Space is low / critically low",
+# "FS [/]: Running out of free inodes", "Backup NFS share less than 15 % free"
+# ("]: " keeps switch triggers such as "Arista: Flash: Disk space is low" out, whatever the match case)
+DISK_TRIGGERS = ["]: Space is", "]: Running out of free inodes", "Backup NFS share"]
+
+
+def disk_conditions(letters, operator):
+    """Trigger-name conditions for DISK_TRIGGERS (operator 2 = contains, 3 = does not contain)."""
+    return [{"conditiontype": 3, "operator": operator, "value": name, "formulaid": fid}
+            for name, fid in zip(DISK_TRIGGERS, letters)]
+
+
+def setup_disk_alerts(z, mt, self_id):
+    """User (no frontend access, read on the server's host group) with an e-mail to DISK_RECIPIENTS only, and
+    the action that mails it the disk triggers. Zabbix only notifies users who can read the host."""
+    grp = z.call("hostgroup.get", {"hostids": self_id, "output": ["groupid"]})
+    rights = [{"id": g["groupid"], "permission": 2} for g in grp]
+    ug = z.call("usergroup.get", {"filter": {"name": [DISK_USER_GROUP]}, "output": ["usrgrpid"]})
+    if ug:
+        ugid = ug[0]["usrgrpid"]
+        z.call("usergroup.update", {"usrgrpid": ugid, "gui_access": 3, "hostgroup_rights": rights})
+    else:
+        ugid = z.call("usergroup.create", {"name": DISK_USER_GROUP, "gui_access": 3,
+                                           "hostgroup_rights": rights})["usrgrpids"][0]
+    media = [{"mediatypeid": mt, "sendto": DISK_RECIPIENTS, "active": 0, "severity": 63, "period": "1-7,00:00-24:00"}]
+    user = z.call("user.get", {"filter": {"username": [DISK_USER]}, "output": ["userid"]})
+    if user:
+        uid = user[0]["userid"]
+        z.call("user.update", {"userid": uid, "usrgrps": [{"usrgrpid": ugid}], "medias": media})
+    else:   # random password, never stored: the group has no frontend access anyway
+        uid = z.call("user.create", {"username": DISK_USER, "name": "Disk space alerts", "roleid": 1,
+                                     "passwd": secrets.token_urlsafe(24) + "aA1!", "usrgrps": [{"usrgrpid": ugid}],
+                                     "medias": media})["userids"][0]
+    letters = "BCDEFGH"[:len(DISK_TRIGGERS)]
+    params = {
+        "name": DISK_ACTION, "eventsource": 0, "status": 0, "esc_period": "1h",
+        # host = Zabbix server and trigger name contains any of DISK_TRIGGERS; any severity
+        "filter": {"evaltype": 3, "formula": f"A and ({' or '.join(letters)})", "conditions": [
+            {"conditiontype": 1, "operator": 0, "value": self_id, "formulaid": "A"},
+            *disk_conditions(letters, 2)]},
+        "operations": [{"operationtype": 0, "esc_step_from": 1, "esc_step_to": 1,
+                        "opmessage": {"default_msg": 1, "mediatypeid": mt}, "opmessage_usr": [{"userid": u} for u in [uid] + setup_monitoring_user.alert_userids(z)]}],
+        "recovery_operations": [{"operationtype": 11, "opmessage": {"default_msg": 1}}],
+    }
+    existing = z.call("action.get", {"filter": {"name": [DISK_ACTION]}, "output": ["actionid"]})
+    if existing:
+        params.pop("eventsource")
+        z.call("action.update", {"actionid": existing[0]["actionid"], **params})
+    else:
+        z.call("action.create", params)
 
 
 def main():
@@ -44,19 +105,25 @@ def main():
     letters = [c for c in "BDEFGHJKLMNOPQRSTUVWXYZ"]   # formula letters; A, C and I are taken
     assert len(switch_groups) <= len(letters), "too many groups for the formula letters"
     group_ids = letters[:len(switch_groups)]
+    disk_ids = letters[len(switch_groups):len(switch_groups) + len(DISK_TRIGGERS)]
+    assert len(disk_ids) == len(DISK_TRIGGERS), "too many groups for the formula letters"
     self_id = z.call("host.get", {"filter": {"host": [SELF_HOST]}})[0]["hostid"]
     params = {
         "name": ACTION, "eventsource": 0, "status": 0, "esc_period": "1h",
-        # (host = A10-LLB or Zabbix server, or host group = any switch group) and severity >= Average
-        "filter": {"evaltype": 3, "formula": f"(A or I or {' or '.join(group_ids)}) and C", "conditions": [
+        # (host = A10-LLB or Zabbix server, or host group = any switch group) and severity >= Average,
+        # and not a disk trigger (those go to DISK_RECIPIENTS only, see setup_disk_alerts)
+        "filter": {"evaltype": 3, "formula": f"(A or I or {' or '.join(group_ids)}) and C"
+                                             + "".join(f" and {x}" for x in disk_ids), "conditions": [
             {"conditiontype": 1, "operator": 0, "value": hostid, "formulaid": "A"},
             {"conditiontype": 1, "operator": 0, "value": self_id, "formulaid": "I"},
             *[{"conditiontype": 0, "operator": 0, "value": g, "formulaid": fid}
               for g, fid in zip(switch_groups, group_ids)],
-            {"conditiontype": 4, "operator": 5, "value": MIN_SEVERITY, "formulaid": "C"}]},
+            {"conditiontype": 4, "operator": 5, "value": MIN_SEVERITY, "formulaid": "C"},
+            *disk_conditions(disk_ids, 3)]},
         "operations": [{"operationtype": 0, "esc_step_from": 1, "esc_step_to": 1,
                         "opmessage": {"default_msg": 1, "mediatypeid": mt},
-                        "opmessage_usr": [{"userid": admin["userid"]}]}],
+                        "opmessage_usr": [{"userid": u} for u in [admin["userid"]]
+                                          + setup_monitoring_user.alert_userids(z)]}],
         "recovery_operations": [{"operationtype": 11, "opmessage": {"default_msg": 1}}],
     }
     existing = z.call("action.get", {"filter": {"name": [ACTION]}, "output": ["actionid"]})
@@ -65,7 +132,9 @@ def main():
         z.call("action.update", {"actionid": existing[0]["actionid"], **params})
     else:
         z.call("action.create", params)
-    print(f"Office365 media type {mt} enabled; Admin -> {', '.join(RECIPIENTS)}; action '{ACTION}' ready.")
+    setup_disk_alerts(z, mt, self_id)
+    print(f"Office365 media type {mt} enabled; Admin -> {', '.join(RECIPIENTS)}; action '{ACTION}' ready; "
+          f"'{DISK_ACTION}' -> {', '.join(DISK_RECIPIENTS)}.")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,106 @@
 Changes to the Pi Network Monitoring tool, newest first. Every configuration change is also visible in the git
 history of `deploy/` (nightly "Configuration snapshot" commits).
 
+## 2026-10-12
+
+### Daily report e-mails re-enabled
+- `/etc/cron.d/zabbix-daily-reports`: the 08:00 IST `send_daily_reports.py` job (paused this morning) runs again,
+  through `cron_run.py`, so Zabbix alerts if it fails or has not finished for 26 h. Native "Daily:" Zabbix reports
+  stay disabled (no duplicate e-mails).
+- `send_daily_reports.py` retries a PDF render twice (30 s apart) before reporting it failed: the dry run after
+  re-enabling hit one transient "dashboard failed to get ready" on Global view that rendered fine on retry.
+
+### Fix: Dashboard PDF of WAN Switches / Monitoring Server failed (500, "dashboard failed to get ready")
+- The click-to-graph graph next to an item list graphs the list's first item; on the new "Links, optics & stack"
+  page that was a text item (an LLDP neighbour name), which cannot be graphed, so the print view never finished and
+  the PDF timed out after ~45 s. Item lists that feed a graph now contain numeric items only (`coverage_pages.py`,
+  `add_server_monitoring.py`, and `click_to_graph.py` page lists skip text items). All 13 dashboards render again.
+
+### Monitoring server: complete monitoring of the Zabbix server itself
+- New `add_server_monitoring.py` (idempotent) on host "Zabbix server", new dashboard **Monitoring Server**
+  (Overview / Database / Web, e-mail, jobs):
+  - **MariaDB**: "MySQL by Zabbix agent 2" (read-only local user `zbx_monitor`, password
+    `/root/.credentials/zabbix_mysql_monitor`, host macro secret) + size of every big Zabbix table (history*,
+    trends*, events, alerts, auditlog) for storage planning.
+  - **Apache**: "Apache by Zabbix agent" (mod_status, local only). **Services**: "Systemd by Zabbix agent 2" for
+    zabbix-server / agent2 / web-service, mariadb, apache2, smokeping, cron, timesyncd, rsyslog.
+  - **Web UI** scenario every minute: Zabbix login page, /reports, SmokePing login prompt (High if it fails 3 min).
+  - **Cron jobs**: every job in `/etc/cron.d/zabbix-*` and the watchdog now runs through `cron_run.py`, which records
+    exit code / run time / end time in `/var/lib/pi-netmon/cron/`; alerts when a job crashes or stops running.
+  - **E-mail delivery**: alerts that failed (last hour) or are stuck unsent (High), SMTP smtp.office365.com:587
+    reachable. **Time**: NTP synchronised, NTP servers answering. **OS**: reboot required, pending / security
+    updates, watchdog paused.
+  - Agent checks in `/etc/zabbix/zabbix_agent2.d/pidc-server.conf`, DB login in `/etc/zabbix/pidc-mysql-monitor.cnf`
+    (root:zabbix 0640, not in git).
+
+### ASR routers and all network switches: complete monitoring
+- New `add_full_coverage.py` (idempotent) adds to all six PIDC device templates, so every current and future device
+  of that model gets it: per-port broadcast / multicast and Ethernet errors (FCS/CRC, alignment, symbol, late
+  collisions); LLDP neighbours (CDP on Catalyst); LACP member bundled / partner in sync; STP topology changes and root;
+  stacking (Cisco StackWise, HPE IRF, Juniper Virtual Chassis, Huawei iStack); transceiver Rx / Tx power with the
+  module's own thresholds; config changed / not saved; flash / storage, PoE, NTP sync, IP SLA, VRFs, IP statistics.
+  ASR only: BGP IPv4 **and IPv6** from CISCO-BGP4-MIB (state, last error text, flaps, prefixes accepted / denied /
+  advertised / withdrawn, UPDATEs), VRRP groups, QoS per class (offered / delivered / dropped), hardware alarm counts.
+  ~6,300 new items, +5% values/s.
+- Optics alarms fire only while the optic's port is up (a dark / unused port reads ~-40 dBm and is covered by the
+  port's link-down alert); extra lanes of 40/100G optics map to their port; the low-warning trigger is suppressed
+  while the low-alarm one is active. iStack ports alert only when a port that was up goes down (chain stacks always
+  have unused ports). Not monitored because always false: Juniper read-only package mounts (/dev/mdN, devfs, jail),
+  ASR920 PoE table (reports 480 W used of 180 W), management VRFs (Mgmt-vrf / Mgmt-intf).
+- The old IPv4-only BGP triggers from `add_routers.py` were removed (the new BGP triggers replace them; the old
+  items stay for history).
+- New `coverage_pages.py`: page "Links, optics & stack" on WAN Switches, PiSB Cloud Fabric, Pi VMware Fabric, Pi MMR /
+  DH Cross Connect, Pi 1G Colo Fabric and ASR Routers (LACP, optics, stack maps, neighbours / LACP / STP / stack and
+  optics / config / NTP / flash lists with click-to-graph, related problems); ASR Routers also get
+  "RTR-n: BGP, VRRP, QoS & IP SLA" per router.
+- Found at setup: 1G-WAN-SW IP SLA 10 / 20 (172.18.156.2 / .10) and ASR_RTR-2 IP SLA 10 (4.2.2.2) timing out;
+  LACP members configured but not bundled (PiSB SP1 Et34, SP2 Et33, 1G-WAN-SW Gi3/1/1, 1G-COLO-DH4-SW1 Gi1/1/4,
+  10G_Leaf_SW-7-8 Te1/0/18 + Te2/0/18, ASR_RTR-2 Te0/0/14 in Po40); ASR_RTR-2 VRRP 40 (Po40) stuck in initialize;
+  DH5_CC_SW4 NTP not synchronised; MMR1_CC_SW4 running config not saved.
+
+### A10 LLB: complete monitoring (BGP and everything else the A10 exposes)
+- New `add_a10_full.py` (idempotent; discovery rules, so new peers / ports / gateways appear by themselves):
+  - **BGP**, IPv4 and IPv6 (A10 BGP MIB 22610.2.5; BGP4-MIB showed only IPv4): per session state, admin state,
+    remote AS / router ID, time in state, flaps, last error (decoded), updates / messages per minute, time since last
+    UPDATE, hold / keepalive, received prefixes; local AS 135133, router ID, our 16 advertised networks.
+    Alerts: session down (High), flapped (Average), up but no prefixes (Average), no own networks originated (High).
+  - **All ports** e1-e11, ve150 (A10 1 s counters, 10 s poll) + management port: status, admin, speed, duplex, MTU,
+    flow control, bits, packets, multicast, errors, drops, collisions, utilisation % of port speed. Alerts: link went
+    down (only ports that were up), errors / drops (macros `{$A10.IF.ERRORS.WARN}` 2/s, `{$A10.IF.DROPS.WARN}` 100/s),
+    half duplex.
+  - **LACP trunk 2** (e6 Router-2 + e10 Router-1): status, traffic, errors, drops, member bundled status.
+  - **SLB**: every gateway incl. IPv6 (health, connections, new conn/s, upload / download, peak), service groups,
+    group members (status, response time), virtual servers and virtual ports.
+  - **Sessions / drops / forwarding**: session table by type, new connections (L4 / L7 / NAT / SSL), total throughput,
+    every axNetStat / axNetStatExt / axSwitchStats counter per second; alerts for no-route drops, source-NAT failures,
+    no-resource drops, server-selection failures, buffer drops, hardware DDoS drops.
+  - **System**: data / control-plane CPU, disk, software on both disks, boot image, serial, HA, ARP, routes.
+  - Not available on this A10 (BareMetal): temperature / fan / PSU (OIDs return 0); OSPF, HA and LLDP not in use.
+- Dashboard "A10 LLB & ISP Links": new pages BGP, A10 Ports & Trunk, A10 SLB, A10 Sessions & Drops; BGP and port
+  maps on NOC Overview; system information on A10 Health (`build_dashboard.py`).
+- Found at setup: PowerGrid BGP IPv4 + IPv6 down (A10 Ethernet 4 admin-disabled; IPv6 last error 2/7 OPEN /
+  unsupported capability, never established); trunk 2 member e6 (Router-2) up but not in the LACP bundle.
+
+### Devices renamed
+- Pi VMware Fabric leaves: 100G_Leaf_SW-1/2 -> 25G_Leaf_SW-1/2; 100G_Leaf_SW-5/6 -> 10G_Leaf_SW-5/6;
+  100G_Leaf_SW-3&4 -> 10G_Leaf_SW-3&4; 100G-Leaf_SW-7&8 -> 10G-Leaf_SW-7&8 (technical host names use 3-4 / 7-8, Zabbix
+  does not allow '&'). Same hosts, history and alerts kept; Leaf 1/2 memory exception (99 %) kept. Dashboard rebuilt;
+  `add_vmware_fabric.py` updated; fabric pages now ordered by short name (spines, then Leaf 1, 2, 3-4, ...).
+- Cross-connect switches: MMR1_SW1..SW4 and MMR1-SW5 -> MMR1_CC_SW1..SW5, DH5_SW1..SW4 -> DH5_CC_SW1..SW4 (host and
+  visible name; the part in brackets is unchanged). Same hosts, so history, graphs and alerts carry on. Dashboards
+  rebuilt; `add_cross_connect_fabrics.py` updated.
+
+### Alerting
+- New e-mail rule "Disk space alerts" -> compute@pidatacenters.com only: monitoring server disk space low (80 %) /
+  critically low (90 %) and inodes running out on / and /boot, and the backup NFS share under 15 % free; all
+  severities plus recovery. Sent through the new frontend-less user `disk-alerts`. These are no longer part of
+  "ISP link alerts" (so network@ does not get them). `setup_email_alerts.py`.
+
+### Reports
+- Daily 08:00 PDF e-mails PAUSED at user request until further notice: the `send_daily_reports.py` line in
+  `/etc/cron.d/zabbix-daily-reports` is commented out (uncomment to resume). Native Zabbix scheduled reports stay
+  disabled.
+
 ## 2026-10-10
 
 ### Stability / self-healing

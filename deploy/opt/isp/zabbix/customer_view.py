@@ -206,7 +206,11 @@ def main():
     click_to_graph.link_pages(pages, DASHBOARD, z=z)   # "Items on this page" list + graph of the clicked item
     params = {"name": DASHBOARD, "display_period": 60, "auto_start": 0, "pages": pages,
               "private": 1, "userGroups": [{"usrgrpid": usrgrpid, "permission": 2}]}
-    dash = z.call("dashboard.get", {"filter": {"name": [DASHBOARD]}, "output": ["dashboardid"]})
+    dash = z.call("dashboard.get", {"filter": {"name": [DASHBOARD]}, "output": ["dashboardid"],
+                                    "selectUserGroups": "extend"})
+    if dash:   # keep other read-only sharing (e.g. the monitoring team, setup_monitoring_user.py)
+        params["userGroups"] += [{"usrgrpid": g["usrgrpid"], "permission": int(g["permission"])}
+                                 for g in dash[0]["userGroups"] if g["usrgrpid"] != usrgrpid]
     if dash:
         dashid = dash[0]["dashboardid"]
         z.call("dashboard.update", {"dashboardid": dashid, **params})

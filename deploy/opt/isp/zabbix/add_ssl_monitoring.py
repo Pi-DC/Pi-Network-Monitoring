@@ -6,6 +6,7 @@ safety net: Zabbix agent 2 reads the served certificate hourly and alerts at < 2
 Idempotent.
 """
 import setup_isp_links as base
+import setup_monitoring_user
 
 DOMAIN = "isp.picloud.in"
 HOST = "Zabbix server"           # has the local agent 2 interface
@@ -60,7 +61,7 @@ def main():
             {"conditiontype": 1, "operator": 0, "value": hostid},
             {"conditiontype": 26, "operator": 0, "value": "component", "value2": "ssl"}]},
         "operations": [{"operationtype": 0, "esc_step_from": 1, "esc_step_to": 1,
-                        "opmessage": {"default_msg": 1, "mediatypeid": mt}, "opmessage_usr": [{"userid": admin}]}],
+                        "opmessage": {"default_msg": 1, "mediatypeid": mt}, "opmessage_usr": [{"userid": u} for u in [admin] + setup_monitoring_user.alert_userids(z)]}],
         "recovery_operations": [{"operationtype": 11, "opmessage": {"default_msg": 1}}],
     }
     existing = z.call("action.get", {"filter": {"name": [ACTION]}, "output": ["actionid"]})

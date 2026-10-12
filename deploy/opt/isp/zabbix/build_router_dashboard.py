@@ -10,6 +10,7 @@ Re-runnable: the dashboard is rebuilt in place.
 import build_dashboard as d
 import build_switch_dashboard as sw
 import click_to_graph
+import coverage_pages
 import setup_isp_links as base
 
 f, INT, STR, HOSTREF = d.f, d.INT, d.STR, d.HOSTREF
@@ -172,6 +173,10 @@ def main():
             sw.problems(f"{short} problems", 0, 58, 72, 6, hostid=hid),
         ]
         pages.append({"name": f"{host} ({short})", "widgets": w})
+        pages.append(coverage_pages.routing_page(z, hosts[host], short, 60 + page_no))   # add_full_coverage.py data
+    links = coverage_pages.links_page(z, [hosts[h] for h, _ in ROUTERS], 50)
+    if links:
+        pages.append(links)
 
     dash = z.call("dashboard.get", {"filter": {"name": [NAME]}, "output": ["dashboardid"]})
     click_to_graph.link_pages(pages, NAME, z=z)   # page item list + graphs where there is room

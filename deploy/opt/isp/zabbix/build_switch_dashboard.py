@@ -35,7 +35,7 @@ DASHBOARDS = [
                   ("GE18-PiSB-LF1", "LF1", "leaf"), ("GE18-PiSB-LF2", "LF2", "leaf")]},
 ]
 
-SHORT_IF = '{{ITEM.NAME}.regsub("^Interface (..)[A-Za-z-]*([0-9/.]+)", "\\1\\2")}'   # Ethernet1/1 -> Et1/1
+SHORT_IF = '{{ITEM.NAME}.regsub("^Interface (..)[A-Za-z-]*([0-9/.]*)", "\\1\\2")}'   # Ethernet1/1 -> Et1/1, X0, MGMT -> MG
 GREY, SLATE = "9AA4B2", "475569"
 # "Port state" (tune_arista_template.py): ifOperStatus 1 up, 2 down, 3 testing, 5 dormant, 6 notPresent,
 # 7 lowerLayerDown - or 8 when the port is administratively shut down
@@ -175,6 +175,7 @@ def health_table(name, x, y, w, h, groupid):
 
 def build(z, cfg):
     import build_fabric_dashboard as fb   # imports this module, so import it at run time
+    import coverage_pages                 # same
     gid = z.call("hostgroup.get", {"filter": {"name": [cfg["group"]]}, "output": ["groupid"]})[0]["groupid"]
     hosts = {h["host"]: h for h in z.call("host.get", {"groupids": gid, "output": ["hostid", "host", "name"],
                                                        "selectTags": ["tag", "value"]})}
@@ -333,6 +334,10 @@ def build(z, cfg):
         pages.append({"name": f"{host} ({short})", "widgets": w})
     for n, h in enumerate(others):   # other vendors: the vendor-neutral fabric page
         pages.append(fb.switch_page(z, h, len(switches) + n, fb.port_count(z, h), page_name=h["name"]))
+    enabled = z.call("host.get", {"groupids": gid, "filter": {"status": 0}, "output": ["hostid", "name"]})
+    links = coverage_pages.links_page(z, sorted(enabled, key=lambda h: h["name"]), 50)   # add_full_coverage.py data
+    if links:
+        pages.append(links)
 
     dash = z.call("dashboard.get", {"filter": {"name": [cfg["name"]]}, "output": ["dashboardid"]})
     click_to_graph.link_pages(pages, cfg["name"], z=z)   # page item list + graphs where there is room

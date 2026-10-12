@@ -91,8 +91,10 @@ def _page_items(z, widgets):
         hostids.update(h["hostid"] for h in z.call("host.get", {"search": {"name": hp}, "searchWildcardsEnabled": True,
                                                                 "output": ["hostid"]}))
     if itemids:
-        for it in z.call("item.get", {"itemids": sorted(itemids), "output": ["hostid", "name_resolved"],
+        for it in z.call("item.get", {"itemids": sorted(itemids), "output": ["hostid", "name_resolved", "value_type"],
                                       "webitems": True}):
+            if it["value_type"] not in ("0", "3"):
+                continue   # text item: the follow graph cannot draw it and the PDF print view would never finish
             hostids.add(it["hostid"])
             want(it["name_resolved"])
     return sorted(hostids, key=int), patterns

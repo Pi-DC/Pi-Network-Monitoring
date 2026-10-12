@@ -19,11 +19,14 @@ import sys
 import build_dashboard as d
 import build_switch_dashboard as sw
 import click_to_graph
+import coverage_pages
 import setup_isp_links as base
 
 f, INT, STR, HOSTREF = d.f, d.INT, d.STR, d.HOSTREF
 GREEN, AMBER, RED = d.GREEN, d.AMBER, d.RED
-FABRICS = ["Pi VMware Fabric", "Pi MMR Cross Connect Fabric", "Pi DH Cross Connect Fabric", "Pi 1G Colo Fabric"]   # dashboard name = host group name
+FABRICS = ["Pi VMware Fabric", "Pi MMR Cross Connect Fabric", "Pi DH Cross Connect Fabric", "Pi 1G Colo Fabric",
+           "H1 Colo Fabric", "1G Prod Fabric",
+           "Admin Core Fabric"]   # dashboard name = host group name
 GROUPREF = 2
 VENDOR = {   # port-channel names and extra hardware patterns per vendor tag
     "arista": {"lag": "Interface Port-Channel*", "hw": ["*Fan*", "*: Power supply status", "*: Voltage"]},
@@ -31,6 +34,9 @@ VENDOR = {   # port-channel names and extra hardware patterns per vendor tag
     "hpe": {"lag": "Interface Bridge-Aggregation*", "hw": ["*: Fan status", "*: Power supply status"]},
     "huawei": {"lag": "Interface Eth-Trunk*", "hw": ["*Fan*"]},
     "juniper": {"lag": "Interface ae*", "hw": ["*: Fan status", "*: Power supply status", "Overall system health status"]},
+    # firewalls (add_firewalls.py): no port-channels - graph every physical port instead
+    "sonicwall": {"lag": "Interface X*", "lag_title": "Port traffic, all X ports (in filled, out lines)", "hw": []},
+    "fortinet": {"lag": "Interface *port*", "lag_title": "Port traffic (in filled, out lines)", "hw": ["*Temperature*", "*Fan*"]},
 }
 HEALTH_ITEMS = ["Health: *", "ICMP ping", "ICMP loss", "ICMP response time", "Uptime (network)", "*CPU utilization",
                 "*Memory utilization", "*: Temperature"]
@@ -103,7 +109,7 @@ def health_item(z, h, name):
 
 
 def short(h):
-    return re.sub(r"^(100G_|MMR1[-_]|DH5[-_]|1G-COLO-)", "", h["host"]).replace("_SW-", " ")   # Spine 1, Leaf 7-8, SW5
+    return re.sub(r"^(100G_|(25|10)G[-_](?=Leaf)|MMR1[-_](CC_)?|DH5[-_](CC_)?|1G-COLO-|1G-(?=Prod)|Admin(?=Core)|H1-|Sonicwall-)", "", h["host"]).replace("_SW-", " ")   # Spine 1, Leaf 7-8, SW5, SPINE3-4, Prod-SW, CoreSW, NSA4600-Primary
 
 
 def switch_page(z, h, page_no, ports, page_name=None):
@@ -141,7 +147,7 @@ def switch_page(z, h, page_no, ports, page_name=None):
                        "Interface *: Bits received", sw.TRAFFIC_TH, ref=tr_ref),
           sw.follow_graph("Traffic in of the port clicked above", 0, y + tm, 72, 5, tr_ref)]
     y += tm + 5
-    w.append(sw.svg("Port-channel traffic (in filled, out lines)", 0, y, 72, 6, me, [
+    w.append(sw.svg(vendor.get("lag_title", "Port-channel traffic (in filled, out lines)"), 0, y, 72, 6, me, [
         {"items": [vendor["lag"] + ": Bits received"], "color": "2563EB", "label": "in", "fill": 2},
         {"items": [vendor["lag"] + ": Bits sent"], "color": "F59E0B", "label": "out", "width": 1}],
         legend_lines=10))
@@ -189,7 +195,7 @@ def build(z, NAME):
     gid = z.call("hostgroup.get", {"filter": {"name": [NAME]}, "output": ["groupid"]})[0]["groupid"]
     hosts = z.call("host.get", {"groupids": gid, "filter": {"status": 0}, "output": ["hostid", "host", "name"],
                                 "selectTags": ["tag", "value"]})
-    hosts.sort(key=lambda h: (tag(h, "role") != "spine", h["host"].replace("-", "_")))   # MMR1-SW5 after MMR1_SW4
+    hosts.sort(key=lambda h: (tag(h, "role") != "spine", short(h)))   # spines first, then Leaf 1, 2, 3-4, ... / SW1, SW2, ...
     ports = {h["hostid"]: port_count(z, h) for h in hosts}
 
     # ---------- Overview ----------
@@ -228,6 +234,9 @@ def build(z, NAME):
 
     # ---------- One page per switch ----------
     pages += [switch_page(z, h, page_no, ports[h["hostid"]]) for page_no, h in enumerate(hosts)]
+    links = coverage_pages.links_page(z, hosts, 50)   # LACP / optics / stack / neighbours (add_full_coverage.py)
+    if links:
+        pages.append(links)
 
     click_to_graph.link_pages(pages, NAME, z=z)   # graphs under the overview maps, page item lists
     dash = z.call("dashboard.get", {"filter": {"name": [NAME]}, "output": ["dashboardid"]})

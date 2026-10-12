@@ -22,17 +22,17 @@ import setup_isp_links as base
 FABRICS = {  # host group: ("fabric" tag, [(host, visible name, IP, model[, template, vendor tag])], template, vendor tag
             #              [, role tag - default "cross-connect"])
     "Pi MMR Cross Connect Fabric": ("mmr", [
-        ("MMR1_SW1", "MMR1_SW1 (PIDC-MMR-1-Ext-SW1)", "10.128.4.221", "Catalyst 2960"),
-        ("MMR1_SW2", "MMR1_SW2 (MMR1-Ext-SW2)", "10.128.4.220", "Catalyst 2960S"),
-        ("MMR1_SW3", "MMR1_SW3 (MMR1-Ext-SW3)", "10.128.4.219", "Catalyst 2960S"),
-        ("MMR1_SW4", "MMR1_SW4 (PIDC-MMR-1-SW-4)", "10.128.4.216", "Catalyst 4500"),
-        ("MMR1-SW5", "MMR1-SW5 (MMR1-Ext-SW5)", "10.128.4.209", "Catalyst 2960X"),
+        ("MMR1_CC_SW1", "MMR1_CC_SW1 (PIDC-MMR-1-Ext-SW1)", "10.128.4.221", "Catalyst 2960"),
+        ("MMR1_CC_SW2", "MMR1_CC_SW2 (MMR1-Ext-SW2)", "10.128.4.220", "Catalyst 2960S"),
+        ("MMR1_CC_SW3", "MMR1_CC_SW3 (MMR1-Ext-SW3)", "10.128.4.219", "Catalyst 2960S"),
+        ("MMR1_CC_SW4", "MMR1_CC_SW4 (PIDC-MMR-1-SW-4)", "10.128.4.216", "Catalyst 4500"),
+        ("MMR1_CC_SW5", "MMR1_CC_SW5 (MMR1-Ext-SW5)", "10.128.4.209", "Catalyst 2960X"),
     ], fab.CATALYST, "cisco"),
     "Pi DH Cross Connect Fabric": ("dh5", [
-        ("DH5_SW1", "DH5_SW1 (DH5-SW1-100Mb)", "10.128.4.222", "Catalyst 2960"),
-        ("DH5_SW2", "DH5_SW2 (DH5-SW2-1G)", "10.128.4.218", "Catalyst 2960S"),
-        ("DH5_SW3", "DH5_SW3 (DH5-SW3-1G)", "10.128.4.217", "Catalyst 4500"),
-        ("DH5_SW4", "DH5_SW4 (DH5-Ext-SW4)", "172.18.127.207", "Catalyst 4500"),
+        ("DH5_CC_SW1", "DH5_CC_SW1 (DH5-SW1-100Mb)", "10.128.4.222", "Catalyst 2960"),
+        ("DH5_CC_SW2", "DH5_CC_SW2 (DH5-SW2-1G)", "10.128.4.218", "Catalyst 2960S"),
+        ("DH5_CC_SW3", "DH5_CC_SW3 (DH5-SW3-1G)", "10.128.4.217", "Catalyst 4500"),
+        ("DH5_CC_SW4", "DH5_CC_SW4 (DH5-Ext-SW4)", "172.18.127.207", "Catalyst 4500"),
     ], fab.CATALYST, "cisco"),
     "Pi 1G Colo Fabric": ("1g-colo", [
         ("1G-COLO-DH5-SW1", "1G-COLO-DH5-SW1 (Huawei-1G-Colo-SW1)", "10.128.16.27", "Huawei S5720-28P-PWR-LI-AC"),
@@ -43,6 +43,18 @@ FABRICS = {  # host group: ("fabric" tag, [(host, visible name, IP, model[, temp
         ("1G-COLO-DH5-SW5", "1G-COLO-DH5-SW5 (1G-COLO-SW-5)", "172.18.127.209", "Catalyst 3650-48FQ",
          fab.CATALYST, "cisco"),   # IOS-XE 16.12.8, 2x PWR-C2-1025WAC
     ], fab.HUAWEI, "huawei"),
+    "H1 Colo Fabric": ("h1-colo", [
+        ("H1-SPINE3-4", "H1-SPINE3&4 (PiAMRDC-OLD-Cloud-Spine3&4)", "172.18.127.22",
+         "Huawei S6720S-26Q-EI-24S-AC (iStack)"),   # VRP V200R011C10SPC600
+    ], fab.HUAWEI, "huawei", "spine"),
+    "1G Prod Fabric": ("1g-prod", [
+        ("1G-Prod-SW", "1G-Prod-SW (PiAMRDC-PRDSW001)", "10.128.4.200",
+         "Catalyst 3650-48TS-S (2-member stack)"),   # IOS-XE 16.3.7, 2x PWR-C2-250WAC
+    ], fab.CATALYST, "cisco", "prod-switch"),
+    "Admin Core Fabric": ("admin-core", [
+        ("AdminCoreSW", "AdminCoreSW (AMRPiCRSW001)", "10.128.16.23",
+         "Huawei S5720-28P-PWR-LI-AC"),   # VRP V200R011C10SPC600
+    ], fab.HUAWEI, "huawei", "core-switch"),
     # Joins the Arista 10G pair (add_switches.py); its dashboard page comes from build_switch_dashboard.py
     "WAN Switches": ("wan", [
         ("1G-WAN-SW", "1G-WAN-SW (AMRPiDC-WANSW001)", "10.128.16.21", "Catalyst 3650-24TS-S (3-member stack)"),
