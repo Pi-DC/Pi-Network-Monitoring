@@ -2,7 +2,7 @@
 
 Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by hand.
 
-## Monitored devices (42 enabled, 44 total)
+## Monitored devices (44 enabled, 44 total)
 
 | Group | Host | Name | IP | Model / vendor | Template | Status |
 |---|---|---|---|---|---|---|
@@ -20,12 +20,12 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | Pi DH Cross Connect Fabric | DH5_CC_SW3 | DH5_CC_SW3 (DH5-SW3-1G) | 10.128.4.217 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi DH Cross Connect Fabric | DH5_CC_SW4 | DH5_CC_SW4 (DH5-Ext-SW4) | 172.18.127.207 | Catalyst 4500 | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi Firewall Fabric | 1G-VDOM-SW | 1G-VDOM-SW | 172.20.96.206 | switch | ICMP Ping | enabled |
-| Pi Firewall Fabric | Fortigate-200F | Fortigate-200F | 172.20.117.16 | FortiGate 200F | ICMP Ping | enabled |
-| Pi Firewall Fabric | Fortigate-300E | Fortigate-300E | 172.16.132.127 | FortiGate 300E | ICMP Ping | **disabled** |
-| Pi Firewall Fabric | GE17-PiSB-Forti120G | GE17-PiSB-Forti120G | 172.28.44.31 | FortiGate 120G | ICMP Ping | enabled |
+| Pi Firewall Fabric | Fortigate-200F | Fortigate-200F | 172.20.117.16 | FortiGate 200F | FortiGate by SNMP - PIDC | enabled |
+| Pi Firewall Fabric | Fortigate-300E | Fortigate-300E | 172.16.32.127 | FortiGate 300E | FortiGate by SNMP - PIDC | enabled |
+| Pi Firewall Fabric | GE17-PiSB-Forti120G | GE17-PiSB-Forti120G | 172.28.44.31 | FortiGate 120G | FortiGate by SNMP - PIDC | enabled |
 | Pi Firewall Fabric | Sonicwall-NSA4600-Primary | Sonicwall-NSA4600-Primary (PIDC-Sonicwall) | 172.20.96.14 | SonicWall NSA 4600 | SonicWall by SNMP - PIDC | enabled |
 | Pi Firewall Fabric | Sonicwall-NSA4600-Secondary | Sonicwall-NSA4600-Secondary (PIDC-Sonicwall) | 172.20.96.15 | SonicWall NSA 4600 | SonicWall by SNMP - PIDC | enabled |
-| Pi Firewall Fabric | Sonicwall-TZ500-GNOC | Sonicwall-TZ500-GNOC | 192.168.216.1 | SonicWall TZ500 | ICMP Ping | **disabled** |
+| Pi Firewall Fabric | Sonicwall-TZ500-GNOC | Sonicwall-TZ500-GNOC | 10.128.16.22 | SonicWall TZ500 | SonicWall by SNMP - PIDC | enabled |
 | Pi MMR Cross Connect Fabric | MMR1_CC_SW1 | MMR1_CC_SW1 (PIDC-MMR-1-Ext-SW1) | 10.128.4.221 | Catalyst 2960 | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi MMR Cross Connect Fabric | MMR1_CC_SW2 | MMR1_CC_SW2 (MMR1-Ext-SW2) | 10.128.4.220 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
 | Pi MMR Cross Connect Fabric | MMR1_CC_SW3 | MMR1_CC_SW3 (MMR1-Ext-SW3) | 10.128.4.219 | Catalyst 2960S | Cisco Catalyst by SNMP - PIDC | enabled |
@@ -71,7 +71,7 @@ Generated nightly by `backup.py` from the Zabbix configuration. Do not edit by h
 | 444 | H1 Colo Fabric | 3 | yes |
 | 445 | 1G Prod Fabric | 3 | yes |
 | 446 | Admin Core Fabric | 3 | yes |
-| 448 | Pi Firewall Fabric | 5 | yes |
+| 448 | Pi Firewall Fabric | 22 | yes |
 
 ## E-mail alerting
 

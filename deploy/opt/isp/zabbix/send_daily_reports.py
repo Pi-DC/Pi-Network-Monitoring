@@ -59,7 +59,7 @@ def send(recipients, subject, body, pdf_path, filename):
         msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=filename)
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=120) as s:
         s.starttls()
-        s.login(mail.SENDER, base.read("/root/.credentials/smtp_alerts_password"))
+        s.login(mail.SENDER, base.read(mail.PASSWORD_FILE))
         s.send_message(msg)
 
 
@@ -104,7 +104,7 @@ def main():
                         "speed and time up per port, and min/avg/max per item.\n\n"
                         "Live view: https://isp.picloud.in/zabbix/ - on-demand reports: https://isp.picloud.in/reports/")
                 if not a.dry_run:
-                    send(recipients, f"Daily report: {name} ({label})", body, path, fname)
+                    send(recipients, f"{mail.SUBJECT_PREFIX}Daily report: {name} ({label})", body, path, fname)
                 log(f"{name}: {'built' if a.dry_run else 'sent'} {size / 1e6:.1f} MB in {time.time() - t0:.0f}s"
                     + ("" if a.dry_run else f" to {', '.join(recipients)}"))
             except subprocess.CalledProcessError as e:

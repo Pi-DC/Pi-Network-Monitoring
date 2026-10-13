@@ -15,9 +15,10 @@ from email.message import EmailMessage
 domain, value, wait = sys.argv[1], sys.argv[2], int(sys.argv[3])
 deadline = (datetime.datetime.now() + datetime.timedelta(seconds=wait)).strftime("%Y-%m-%d %H:%M")
 msg = EmailMessage()
-msg["From"] = "alerts@pidatacenters.com"
+sender = open("/root/.credentials/smtp_sender").read().strip()
+msg["From"] = sender
 msg["To"] = "compute@pidatacenters.com, network@pidatacenters.com"
-msg["Subject"] = f"ACTION: update DNS TXT for {domain} certificate renewal (by {deadline} IST)"
+msg["Subject"] = f"[Network-Monitoring] ACTION: update DNS TXT for {domain} certificate renewal (by {deadline} IST)"
 msg.set_content(f"""The SSL certificate for https://{domain} is being renewed (Let's Encrypt).
 
 Please update this record on BOTH Windows DNS servers (ns3 103.210.73.180 and ns4 103.210.73.181):
@@ -38,7 +39,7 @@ return the value. It waits until {deadline} IST; if missed, it tries again with 
 """)
 with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as s:
     s.starttls(context=ssl.create_default_context())
-    s.login("alerts@pidatacenters.com", open("/root/.credentials/smtp_alerts_password").read().strip())
+    s.login(sender, open("/root/.credentials/smtp_password").read().strip())
     s.send_message(msg)
 print("renewal TXT value emailed to compute@ and network@")
 PY

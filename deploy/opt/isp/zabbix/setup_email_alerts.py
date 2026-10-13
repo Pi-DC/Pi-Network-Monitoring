@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Email alerts for the A10-LLB host via Office 365.
 
-- Enables Zabbix's built-in "Office365" media type with the alerts@ mailbox
-  (password read from /root/.credentials/smtp_alerts_password).
+- Enables Zabbix's built-in "Office365" media type with the sender mailbox in SENDER_FILE (password in
+  PASSWORD_FILE); every mailer (daily reports, watchdog, SSL renewal hook) reads the same two files.
 - Gives the Admin user an email media for that address.
 - Creates the "ISP link alerts" action: problems of severity Average or higher on A10-LLB, on the Zabbix server
   itself (caches, memory, disk) or on any host in
@@ -20,7 +20,11 @@ import secrets
 import setup_isp_links as base
 import setup_monitoring_user
 
-SENDER = "alerts@pidatacenters.com"
+# One sender for every e-mail from this server (monitoring@ requested 2026-10-13; switch_sender.py moves it over).
+SENDER_FILE, PASSWORD_FILE = "/root/.credentials/smtp_sender", "/root/.credentials/smtp_password"
+SENDER = base.read(SENDER_FILE)
+# Every e-mail subject starts with this, so mailboxes can filter all alerts and reports (user request 2026-10-13).
+SUBJECT_PREFIX = "[Network-Monitoring] "
 RECIPIENTS = ["compute@pidatacenters.com", "network@pidatacenters.com"]
 ACTION = "ISP link alerts"
 MIN_SEVERITY = "3"   # 3 = Average; 4 = High; 5 = Disaster
@@ -85,12 +89,32 @@ def setup_disk_alerts(z, mt, self_id):
         z.call("action.create", params)
 
 
+def apply_sender(z):
+    """Point the Office365 media type at the sender in SENDER_FILE / PASSWORD_FILE; returns its mediatypeid."""
+    mt = z.call("mediatype.get", {"filter": {"name": ["Office365"]}, "output": ["mediatypeid"]})[0]["mediatypeid"]
+    sender = base.read(SENDER_FILE)
+    z.call("mediatype.update", {"mediatypeid": mt, "status": 0, "smtp_email": sender, "username": sender,
+                                "passwd": base.read(PASSWORD_FILE),
+                                "smtp_authentication": 1, "smtp_verify_peer": 1, "smtp_verify_host": 1})
+    return mt
+
+
+def apply_subject_prefix(z, mt):
+    """Prefix SUBJECT_PREFIX to every message template subject of the Office365 media type (all actions use them)."""
+    t = z.call("mediatype.get", {"mediatypeids": [mt], "selectMessageTemplates": "extend", "output": ["mediatypeid"]})
+    templates = t[0]["message_templates"]
+    if all(m["subject"].startswith(SUBJECT_PREFIX) for m in templates):
+        return
+    for m in templates:
+        if not m["subject"].startswith(SUBJECT_PREFIX):
+            m["subject"] = SUBJECT_PREFIX + m["subject"]
+    z.call("mediatype.update", {"mediatypeid": mt, "message_templates": templates})
+
+
 def main():
     z = base.Zabbix()
-    mt = z.call("mediatype.get", {"filter": {"name": ["Office365"]}, "output": ["mediatypeid"]})[0]["mediatypeid"]
-    z.call("mediatype.update", {"mediatypeid": mt, "status": 0, "smtp_email": SENDER, "username": SENDER,
-                                "passwd": base.read("/root/.credentials/smtp_alerts_password"),
-                                "smtp_authentication": 1, "smtp_verify_peer": 1, "smtp_verify_host": 1})
+    mt = apply_sender(z)
+    apply_subject_prefix(z, mt)
 
     admin = z.call("user.get", {"filter": {"username": ["Admin"]}, "selectMedias": "extend", "output": ["userid"]})[0]
     medias = [{k: v for k, v in md.items() if k in ("mediatypeid", "sendto", "active", "severity", "period")}

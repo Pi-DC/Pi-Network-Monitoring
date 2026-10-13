@@ -31,7 +31,7 @@ def main():
 
     created, renamed = [], []
     for did, name in sorted(dashboards.items(), key=lambda x: x[1]):
-        params = {"name": (PREFIX + name)[:255], "subject": f"Daily report: {name} (previous day)",
+        params = {"name": (PREFIX + name)[:255], "subject": f"[Network-Monitoring] Daily report: {name} (previous day)",
                   "message": f'Attached: Zabbix dashboard "{name}" for the previous day (00:00-24:00 IST).\n'
                              "Live view: https://isp.picloud.in/zabbix/ - on-demand reports: https://isp.picloud.in/reports/"}
         if did not in ours:
@@ -39,7 +39,7 @@ def main():
                                      "cycle": CYCLE_DAILY, "start_time": START_TIME, "status": STATUS,
                                      "users": [{"userid": admin, "access_userid": admin, "exclude": 0}]})
             created.append(name)
-        elif ours[did]["name"] != params["name"] or ours[did]["status"] != str(STATUS):
+        elif ours[did]["name"] != params["name"] or ours[did]["subject"] != params["subject"] or ours[did]["status"] != str(STATUS):
             z.call("report.update", {"reportid": ours[did]["reportid"], **params, "status": STATUS})
             renamed.append(name)
     stale = [r["reportid"] for did, r in ours.items() if did not in dashboards]

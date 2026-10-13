@@ -24,6 +24,7 @@ is read by Zabbix, which e-mails on failure or when no backup succeeded for 26 h
 Passphrase: /root/.credentials/backup_passphrase (never in git; keep a copy outside the server).
 
 Restore: RESTORE.md / restore.sh in the repository. Check run (nothing pushed or copied): backup.py --no-push
+Manual run after a change: backup.py --message "<what changed>" (git commit title instead of "Configuration snapshot").
 """
 import datetime
 import glob
@@ -80,6 +81,8 @@ ROOT_DOCS = ("README.md", "RESTORE.md", "CHANGELOG.md", "restore.sh")   # also c
 SECRETS = ["/root/.credentials", "/etc/letsencrypt", "/etc/zabbix/zabbix_server.conf", "/etc/zabbix/web/zabbix.conf.php"]
 # SmokePing is deliberately not backed up (user request 2026-10-09); its secrets stay on the redaction list below.
 NOT_BACKED_UP = re.compile(r"smokeping", re.I)   # Apache confs / modules list filter
+# Files in /root/.credentials that are not secret (the sender address appears in scripts and docs, keep it readable)
+NOT_SECRET = {"smtp_sender"}
 PACKAGES = r"^(zabbix|mariadb|apache2|libapache2-mod-php|php8|fping|snmp|google-chrome|poppler-utils|certbot|zstd|gpg|nfs-common)"
 
 
@@ -146,6 +149,8 @@ def secret_values():
     """Every secret string that must never appear in plain text in git."""
     vals = set()
     for f in glob.glob("/root/.credentials/*"):
+        if os.path.basename(f) in NOT_SECRET:
+            continue
         for line in open(f, errors="ignore"):
             if len(line.strip()) >= 6:
                 vals.add(line.strip())
@@ -335,6 +340,7 @@ def main():
     started = time.time()
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
     dry = "--no-push" in sys.argv
+    message = sys.argv[sys.argv.index("--message") + 1] if "--message" in sys.argv else f"Configuration snapshot {stamp}"
     os.umask(0o077)
     tmp = tempfile.mkdtemp(prefix="pi-netmon-backup-", dir="/var/tmp")
     out = f"{tmp}/{stamp}"
@@ -380,7 +386,7 @@ def main():
         # 3. git: commit only when configuration / docs changed
         git("add", "-A")
         if git("status", "--porcelain", capture=True):
-            git("commit", "-q", "-m", f"Configuration snapshot {stamp}")
+            git("commit", "-q", "-m", message)
         git("push", "-q", "origin", "main")
         rev = git("rev-parse", "HEAD", capture=True)
 

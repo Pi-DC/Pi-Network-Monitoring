@@ -6,6 +6,12 @@ enabled or upgraded from ICMP-only to SNMP:  python3 build_firewall_dashboard.py
                             session table use, VPN, NAT), sessions and VPN traffic of all firewalls, port maps, problems
   <firewall> – firewall   - sessions, session table, CPU (total / forwarding / management), memory, VPN tunnels and
                             traffic, NAT, DPI-SSL, model / serial / firmware, item list with graph, problems
+  <FortiGate> – VPN & users   - IPsec tunnel map (phase-1 state), totals, traffic, every tunnel / selector / dial-up
+                            gateway / SSL VPN user with graph, connected SSL VPN users and dial-up clients (lists)
+  <FortiGate> – security & FortiGuard - contract expiry, update checks, definition versions, IPS / AV / web filter
+                            per minute, conserve-mode memory, session rate, NPU / ephemeral tables, HA, config
+                            changes, log devices, policy audit, per-VDOM counters with graph
+  <SonicWall> – VPN & security - IPsec SA list and per-policy traffic, zone security services, syslog rate
   <device> – ports & health  - the fabric switch page (build_fabric_dashboard.switch_page): port maps, traffic,
                             interfaces, health; for the 1G-VDOM switch once its SNMP answers
 Devices still waiting for SNMP (tag snmp=pending) show only in the health table (reachability and latency).
@@ -54,7 +60,11 @@ def firewall_table(name, x, y, w, h, groupid):
             ("VPN encrypted", 1, "Firewall: VPN traffic encrypted (sent into tunnels)", 1, 1, ()),
             ("VPN decrypted", 1, "Firewall: VPN traffic decrypted (received from tunnels)", 1, 1, ()),
             ("NAT translations", 1, "Firewall: NAT translations", 1, 0, ()),
-            ("Fwd + inspect CPU %", 1, "Firewall: Forwarding and inspection CPU utilization", 2, 0, sw.PCT_TH)]
+            ("Fwd + inspect CPU %", 1, "Firewall: Forwarding and inspection CPU utilization", 2, 0, sw.PCT_TH),
+            ("IPsec tunnels down", 1, "IPsec: tunnels down", 1, 0, ((0, GREEN), (1, AMBER))),
+            ("SSL VPN users", 1, "Firewall: SSL VPN users", 1, 0, ()),
+            ("FortiGuard days left", 1, "FortiGuard: days until the first contract expires", 1, 0,
+             ((0, RED), (15, AMBER), (60, GREEN)))]
     fields = [f(fd.GROUPREF, "groupids.0", groupid), f(INT, "column", 1), f(INT, "order", 2),
               f(INT, "show_lines", 20), f(INT, "rf_rate", 30)]
     for n, (cname, data, item, display, dec, th) in enumerate(cols):
@@ -103,8 +113,8 @@ def firewall_page(z, h, page_no):
               {"items": ["Firewall: VPN tunnels up*"], "color": "16A34A", "label": "tunnels / SAs up"},
               {"items": ["Firewall: VPN peers", "Firewall: SSL VPN users"], "color": "0EA5E9", "label": "peers / users"}])]
     y += 10
-    w += [fd.navigator("Firewall items - click one to graph it", 0, y, 36, 14, hid, NUMERIC_ITEMS, "component", ref,
-                       lines=200, rate=30),
+    w += [navigator2("Firewall items - click one to graph it", 0, y, 36, 14, hid, NUMERIC_ITEMS, ["component"], ref,
+                     lines=200),
           sw.follow_graph("Graph of the firewall item selected on the left", 36, y, 36, 14, ref)]
     y += 14
     info = [n for n in INFO.get(fd.tag(h, "vendor"), []) if n in items]
@@ -116,6 +126,168 @@ def firewall_page(z, h, page_no):
     y += 3 if info else 0
     w.append(sw.problems(f"{fd.short(h)} problems", 0, y, 72, 64 - y, hostid=hid))
     return {"name": f"{fd.short(h)} – firewall", "widgets": w}
+
+
+def tiles_row(items, specs, y, h=3):
+    """A row of value tiles sharing the 72 columns; specs: (item name, label, decimals, thresholds)."""
+    specs = [t for t in specs if t[0] in items]
+    widths = [72 // len(specs) + (n >= len(specs) - 72 % len(specs)) for n in range(len(specs))] if specs else []
+    return [sw.tile(label, items[name], sum(widths[:n]), y, label, w=widths[n], h=h,
+                    decimals=0 if dec == "text" else dec, th=th,
+                    value_size=12 if dec == "text" else 22)
+            for n, (name, label, dec, th) in enumerate(specs)]
+
+
+def history(name, x, y, w, h, itemid, column, lines=5):
+    """Latest values of a text item (newest first): connected users, SA list, policy audit ..."""
+    return d.widget("itemhistory", name, x, y, w, h, [
+        f(STR, "columns.0.name", column), f(d.ITEM, "columns.0.itemid", itemid), f(INT, "columns.0.display", 1),
+        f(INT, "columns.0.monospace_font", 1), f(INT, "show_lines", lines), f(INT, "show_timestamp", 1),
+        f(INT, "sortorder", 0), f(INT, "show_column_header", 0), f(INT, "rf_rate", 60)])
+
+
+def navigator2(name, x, y, w, h, hostid, patterns, tags, ref, lines=3000):
+    """Item navigator grouped by up to two tags (e.g. component, then tunnel)."""
+    fields = [f(d.HOSTREF, "hostids.0", hostid)] + [f(STR, f"items.{i}", p) for i, p in enumerate(patterns)]
+    for n, t in enumerate(tags):
+        fields += [f(INT, f"group_by.{n}.attribute", 3), f(STR, f"group_by.{n}.tag_name", t)]
+    # numeric items only (add_firewall_detail tags text items 'value: text'): a follow graph of a text item never
+    # gets ready and breaks the PDF print of the dashboard
+    fields += [f(INT, "item_tags_evaltype", 0), f(STR, "item_tags.0.tag", "value"), f(INT, "item_tags.0.operator", 5),
+               f(STR, "item_tags.0.value", "")]
+    fields += [f(INT, "show_lines", lines), f(INT, "rf_rate", 60), f(STR, "reference", ref)]
+    return d.widget("itemnavigator", name, x, y, w, h, fields)
+
+
+VPN_STATE_TH = ((0, RED), (1, AMBER), (2, GREEN))
+
+
+def tunnel_map(name, x, y, w, h, hostid):
+    """Honeycomb of IPsec phase-1 tunnels: green all selectors up, amber some, red none."""
+    fields = [f(d.HOSTREF, "hostids.0", hostid), f(STR, "items.0", "IPsec tunnel *: state"),
+              f(INT, "show.0", 1), f(INT, "show.1", 2), f(INT, "primary_label_type", 0),
+              f(STR, "primary_label", '{{ITEM.NAME}.regsub("IPsec tunnel (.*): state", "\\1")}'),
+              f(INT, "primary_label_size_type", 0), f(INT, "primary_label_bold", 1),
+              f(INT, "secondary_label_type", 1), f(INT, "secondary_label_decimal_places", 0), f(INT, "rf_rate", 60)]
+    return d.widget("honeycomb", name, x, y, w, h, fields + d.thresholds(*VPN_STATE_TH))
+
+
+def fortigate_vpn_page(z, h, page_no):
+    items, me, hid = items_by_name(z, h), [h["name"]], h["hostid"]
+    w = tiles_row(items, [("IPsec: tunnels up", "IPsec tunnels up", 0, ()),
+                          ("IPsec: tunnels partly up", "partly up", 0, ((0, GREEN), (1, AMBER))),
+                          ("IPsec: tunnels down", "down", 0, ((0, GREEN), (1, RED))),
+                          ("IPsec: tunnels configured", "configured", 0, ()),
+                          ("IPsec: phase-2 selectors down", "selectors down", 0, ()),
+                          ("IPsec dial-up: clients connected", "dial-up clients", 0, ()),
+                          ("SSL VPN: users logged in (all VDOMs)", "SSL VPN users", 0, ()),
+                          ("SSL VPN: tunnel-mode sessions (all VDOMs)", "SSL tunnels", 0, ()),
+                          ("Firewall: authenticated users (all VDOMs)", "auth users", 0, ()),
+                          ("IPsec: traffic in (all tunnels)", "IPsec in", 1, ()),
+                          ("IPsec: traffic out (all tunnels)", "IPsec out", 1, ())], 0)
+    y = 3
+    cells = len([n for n in items if n.startswith("IPsec tunnel ") and n.endswith(": state")])
+    mh = sw.map_rows(max(cells, 1), 72, 5, 10)
+    w.append(tunnel_map(f"IPsec tunnels ({cells}: green all selectors up, amber some, red none)", 0, y, 72, mh, hid))
+    y += mh
+    w += [sw.svg("IPsec traffic, all tunnels (in filled, out line)", 0, y, 36, 8, me, [
+              {"items": ["IPsec: traffic in (all tunnels)"], "color": "2563EB", "label": "in", "fill": 2},
+              {"items": ["IPsec: traffic out (all tunnels)"], "color": "F59E0B", "label": "out", "width": 1}]),
+          sw.svg("Tunnels up, dial-up clients, SSL VPN users", 36, y, 36, 8, me, [
+              {"items": ["IPsec: tunnels up"], "color": "16A34A", "label": "IPsec tunnels up"},
+              {"items": ["IPsec: tunnels down"], "color": "E5484D", "label": "IPsec tunnels down"},
+              {"items": ["IPsec dial-up: clients connected"], "color": "7C3AED", "label": "dial-up clients"},
+              {"items": ["SSL VPN: users logged in (all VDOMs)"], "color": "0EA5E9", "label": "SSL VPN users"}])]
+    y += 8
+    ref = sw.page_ref("FVN", page_no)
+    w += [navigator2("Every tunnel, selector, dial-up gateway and SSL VPN user - click one to graph it", 0, y, 36, 16,
+                     hid, ["IPsec*", "SSL VPN*"], ["component", "vpn"], ref),
+          sw.follow_graph("Graph of the item selected on the left", 36, y, 36, 16, ref)]
+    y += 16
+    for n, (name, col) in enumerate((("SSL VPN: connected users", "Connected SSL VPN users (newest list first)"),
+                                     ("IPsec dial-up: connected clients", "Connected IPsec dial-up clients"))):
+        if name in items:
+            w.append(history(col, n * 36, y, 36, 12, items[name], col))
+    y += 12
+    w.append(sw.problems(f"{fd.short(h)} VPN problems", 0, y, 72, 64 - y, hostid=hid))
+    return {"name": f"{fd.short(h)} – VPN & users", "widgets": w}
+
+
+def fortigate_security_page(z, h, page_no):
+    items, me, hid = items_by_name(z, h), [h["name"]], h["hostid"]
+    w = tiles_row(items, [("FortiGuard: days until the first contract expires", "contract days left", 0,
+                           ((0, RED), (15, AMBER), (60, GREEN))),
+                          ("FortiGuard: contract expiring first", "expires first", "text", ()),
+                          ("FortiGuard: hours since the last update check", "h since update check", 1,
+                           ((0, GREEN), (26, RED))),
+                          ("FortiGuard: definition packages whose last update failed", "failed updates", 0,
+                           ((0, GREEN), (1, RED))),
+                          ("FortiGuard: antivirus definitions version", "AV definitions", "text", ()),
+                          ("FortiGuard: IPS definitions version", "IPS definitions", "text", ())], 0)
+    w += tiles_row(items, [("Memory utilization", "memory", 1, ((0, GREEN), (80, AMBER), (88, RED))),
+                           ("Low memory (kernel) utilization", "kernel memory", 1, ((0, GREEN), (80, AMBER), (88, RED))),
+                           ("Firewall: new sessions per second (1-min average)", "new sessions/s", 0, ()),
+                           ("Firewall: NPU session table use", "NPU table", 1, SESSION_TH),
+                           ("Firewall: ephemeral session table use", "ephemeral", 1, SESSION_TH),
+                           ("HA: cluster members", "HA members", 0, ()),
+                           ("HA: primary unit serial number", "HA primary", "text", ()),
+                           ("Time since the last configuration change", "since config change", 0, ()),
+                           ("Last reboot reason", "reboot reason", "text", ())], 3)
+    w += tiles_row(items, [("Firewall policies: configured", "policies", 0, ()),
+                           ("Firewall policies: no traffic since boot", "no traffic since boot", 0, ()),
+                           ("Firewall policies: idle over 30 days", "idle > 30 d", 0, ()),
+                           ("Firewall policies: idle over 90 days", "idle > 90 d", 0, ()),
+                           ("Firewall: highest IP-pool port use", "IP pool use", 0, SESSION_TH),
+                           ("DHCP: highest lease-pool use", "DHCP pool use", 0, SESSION_TH)], 6)
+    y = 9
+    w += [sw.svg("IPS per minute (all VDOMs)", 0, y, 36, 8, me, [
+              {"items": ["Security: IPS intrusions detected per minute (all VDOMs)"], "color": "F59E0B", "label": "detected", "fill": 2},
+              {"items": ["Security: IPS intrusions blocked per minute (all VDOMs)"], "color": "16A34A", "label": "blocked", "width": 1},
+              {"items": ["Security: IPS critical-severity detections per minute (all VDOMs)"], "color": "E5484D", "label": "critical"},
+              {"items": ["Security: IPS high-severity detections per minute (all VDOMs)"], "color": "7C3AED", "label": "high", "width": 1}]),
+          sw.svg("Antivirus and web filter per minute (all VDOMs)", 36, y, 36, 8, me, [
+              {"items": ["Security: viruses detected per minute (all VDOMs)"], "color": "E5484D", "label": "viruses"},
+              {"items": ["Security: web filter: requests blocked*"], "color": "F59E0B", "label": "web blocked"},
+              {"items": ["Security: VoIP calls blocked*", "Security: P2P connections blocked*"], "color": "0EA5E9",
+               "label": "VoIP / P2P blocked", "width": 1}])]
+    y += 8
+    ref = sw.page_ref("FSN", page_no)
+    w += [navigator2("Per VDOM, FortiGuard, log devices, HA, policies - click one to graph it", 0, y, 36, 18, hid,
+                     ["VDOM *", "FortiGuard *", "Log device *", "HA*", "Firewall policies*", "Security:*",
+                      "Sensor *", "Memory utilization", "Low memory*", "Firewall: *"], ["component", "vdom"], ref),
+          sw.follow_graph("Graph of the item selected on the left", 36, y, 36, 18, ref)]
+    y += 18
+    if "Firewall policies without traffic since boot (by VDOM)" in items:
+        w.append(history("Policies without traffic since boot, by VDOM (policy IDs) - candidates for review",
+                         0, y, 36, 64 - y, items["Firewall policies without traffic since boot (by VDOM)"],
+                         "Policies without traffic since boot", lines=1))
+    w.append(sw.problems(f"{fd.short(h)} problems", 36, y, 36, 64 - y, hostid=hid))
+    return {"name": f"{fd.short(h)} – security & FortiGuard", "widgets": w}
+
+
+def sonicwall_detail_page(z, h, page_no):
+    items, me, hid = items_by_name(z, h), [h["name"]], h["hostid"]
+    w = tiles_row(items, [("Firewall: VPN tunnels up (IPsec SAs)", "IPsec SAs", 0, ()),
+                          ("Firewall: VPN peers", "VPN peers", 0, ()),
+                          ("Syslog: messages per minute", "syslog msgs/min", 0, ((0, RED), (1, GREEN))),
+                          ("Content filter service", "content filter", "text", ()),
+                          ("Zones without IPS or gateway anti-virus", "zones without IPS / GAV", 0, ((0, GREEN), (1, AMBER))),
+                          ("Firewall: DPI-SSL connections peak", "DPI-SSL peak", 0, ())], 0)
+    y = 3
+    for name, col, hh in (("IPsec: security associations", "IPsec security associations (policy: peer, networks, created)", 10),
+                          ("Zones: security services", "Security services per zone (CFS, gateway AV, anti-spyware, IPS, app control, SSL control)", 10)):
+        if name in items:
+            w.append(history(col, 0, y, 72, hh, items[name], col, lines=3))
+            y += hh
+    ref = sw.page_ref("SVN", page_no)
+    w += [navigator2("VPN policies, syslog, zones - click one to graph it", 0, y, 36, 14, hid,
+                     ["IPsec *", "Syslog*", "Zones*", "Firewall: *"], ["component", "vpn"], ref),
+          sw.follow_graph("Graph of the item selected on the left", 36, y, 36, 14, ref)]
+    y += 14
+    w.append(sw.svg("Syslog messages per minute", 0, y, 36, 8, me, [
+        {"items": ["Syslog: messages per minute"], "color": "2563EB", "label": "messages/min", "fill": 2}]))
+    w.append(sw.problems(f"{fd.short(h)} problems", 36, y, 36, 64 - y, hostid=hid))
+    return {"name": f"{fd.short(h)} – VPN & security", "widgets": w}
 
 
 def build(z):
@@ -178,6 +350,10 @@ def build(z):
     for n, h in enumerate(snmp):
         if fd.tag(h, "role") == "firewall":
             pages.append(firewall_page(z, h, n))
+            if fd.tag(h, "vendor") == "fortinet":
+                pages += [fortigate_vpn_page(z, h, n), fortigate_security_page(z, h, n)]
+            elif fd.tag(h, "vendor") == "sonicwall":
+                pages.append(sonicwall_detail_page(z, h, n))
         pages.append(fd.switch_page(z, h, n, ports[h["hostid"]], page_name=f"{fd.short(h)} – ports & health"))
     links = coverage_pages.links_page(z, snmp, 50)
     if links:

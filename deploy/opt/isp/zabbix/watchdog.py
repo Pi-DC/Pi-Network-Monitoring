@@ -78,13 +78,13 @@ def web_ok():
 def send(subject, body):
     msg = EmailMessage()
     msg["From"], msg["To"] = mail.SENDER, ", ".join(mail.RECIPIENTS)
-    msg["Subject"] = f"[isp.picloud.in watchdog] {subject}"
+    msg["Subject"] = f"{mail.SUBJECT_PREFIX}Watchdog: {subject}"
     msg.set_content(body + f"\n\nHost {socket.gethostname()} (172.20.119.99), {time.strftime('%Y-%m-%d %H:%M:%S IST')}."
                            "\nWatchdog: /opt/isp/zabbix/watchdog.py, log /var/log/zabbix/watchdog.log")
     try:
         with smtplib.SMTP("smtp.office365.com", 587, timeout=60) as s:
             s.starttls()
-            s.login(mail.SENDER, base.read("/root/.credentials/smtp_alerts_password"))
+            s.login(mail.SENDER, base.read(mail.PASSWORD_FILE))
             s.send_message(msg)
     except Exception as e:
         log(f"e-mail failed ({subject}): {e}")

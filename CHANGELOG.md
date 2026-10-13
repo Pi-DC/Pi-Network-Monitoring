@@ -3,6 +3,78 @@
 Changes to the Pi Network Monitoring tool, newest first. Every configuration change is also visible in the git
 history of `deploy/` (nightly "Configuration snapshot" commits).
 
+## 2026-10-13
+
+### E-mail: subject tag, sender and recipients
+- Every e-mail subject now starts with `[Network-Monitoring]` (Zabbix alert / recovery / update templates of the
+  Office365 media type, daily PDF reports, watchdog, SSL renewal hook, disabled native "Daily:" reports), so
+  mailboxes can filter all monitoring mail with one rule. `setup_email_alerts.SUBJECT_PREFIX`, applied by
+  `apply_subject_prefix()`.
+- One sender for every mailer: `/root/.credentials/smtp_sender` + `smtp_password` (`setup_email_alerts.SENDER_FILE`
+  / `PASSWORD_FILE`, `apply_sender()` updates the media type); daily reports, watchdog and the SSL hook read the
+  same files. Sender stays alerts@pidatacenters.com: switching to monitoring@ was tested and cancelled (Office365
+  rejected every send with 554 5.2.2 MessagesPerFolderCount quota on that mailbox).
+- Recipients: alerts (ISP link, SSL certificate, disk space) -> compute@ + network@ (disk: compute@) +
+  monitoring@pidatacenters.com (Pi-Monitoring user, alerts only). Daily PDF reports, watchdog and SSL renewal
+  mails -> compute@ + network@ only.
+- backup.py: `--message` for a descriptive commit title on manual runs; `smtp_sender` is not treated as a secret.
+
+### Fleet audit (all 44 enabled hosts) and fixes (`fix_snmp_quirks.py`, idempotent)
+- Checked every host: interfaces available (only 1G-VDOM-SW waits for SNMP), no stale items (heartbeats taken
+  into account), never-filled items only the SNMP-trap fallbacks (no traps configured), 52 unsupported items and
+  6 discovery-rule timeouts -> now 0 unsupported.
+- Catalyst 2960+ (DH5_CC_SW1, MMR1_CC_SW1): model / serial read from entPhysical index {$ENT.CHASSIS.INDEX}
+  (template default 1, these hosts 1001) - they were unsupported.
+- Global SNMP agent timeout 3 s -> 10 s: old-style discovery[] rules (no per-item timeout) timed out on the stacked
+  10G_Leaf_SW-3-4 / 7-8. 10G_Leaf_SW-7-8 temp.discovery disabled on the host (HPE agent stalls in entPhysicalDescr;
+  temperatures still come from the health items).
+- Disabled on the hosts only (the device does not report them): management-port broadcast / multicast counters,
+  stack-ring state on standalone 2960s, BRIDGE-MIB STP on per-VLAN-STP switches, the unused half of the 2960X
+  dual-purpose uplinks (MMR1_CC_SW5 Gi1/0/49, Te1/0/2), Zabbix server self-monitoring of processes that are not
+  configured. These items had written ~670 log lines each per day.
+- Reports verified: daily PDF dry run of all 17 dashboards, /reports CSV time series + summary + data PDF and
+  Dashboard PDF (Pi Firewall Fabric, 22 pages + detail charts = 278 pages, 63 s) as the read-only user; no
+  Zabbix / Apache / PHP / MariaDB / web-service crashes, no OOM.
+
+### Fortigate-300E added (172.16.32.127, community in `fortigate_300e_snmp_community`)
+- Was 172.16.132.127 (unreachable); upgraded to 'FortiGate by SNMP - PIDC' with all detail items; HA active-passive
+  pair Pi-AMR-Forti-2 (primary, polled) / Pi-AMR-Forti-1. 'Free disk percentage' disabled on the host (no disk).
+- Template fix: the stock FortiAP items read the WTP session table, which the AP walk did not include (every AP item
+  failed); the walk now covers it. {$WC.ID.NOT_MATCHES} filters the FortiOS factory sample AP 'AP-11N-SERIAL-0001'.
+
+### Firewalls: detailed monitoring (`add_firewall_detail.py`, called by `add_firewalls.py`)
+- FortiGate (all counters over every VDOM; the stock IPS / SSL VPN items read VDOM 1 only and the VDOM-1 IPS items
+  are disabled): IPsec per phase-2 selector (status, traffic, phase-1 / peer / VDOM) and per phase-1 tunnel (state,
+  selectors up, traffic) + totals; dial-up clients per gateway + client list; SSL VPN users / tunnels / web sessions,
+  connected-user list (text, 180 d) and per-user sessions / traffic; FortiGuard contracts (days to expiry, alerts at
+  60 / 15 / 0 d), definition packages (version, age; alerts for AV / IPS / botnet / URL / app definitions), hours since
+  the last update check; IPS / AV / web filter / VoIP / P2P per minute per VDOM and total; session setup rate, NPU and
+  ephemeral session tables, conserve-mode memory alert (88%), reboot reason, configuration revision / last change,
+  DHCP / IP-pool use, log devices (sent / failed / dropped, alerts; FortiGuard cloud log 'fds' excluded), policy
+  audit (no traffic since boot, idle 30 / 90 d, list), HA members / failover / sync alerts, hardware sensor alarms.
+- The stock 'Tunnel down' trigger cleared itself one poll after firing; it now alerts when a selector that was up
+  in the last 24 h is down 5 min and stays open until it is up again.
+- SonicWall: per VPN policy SAs / peers / traffic, SA list, syslog messages per minute (alert when none for 15 min),
+  content filter state, DPI-SSL peak, security services per zone.
+- Dashboard 'Pi Firewall Fabric': new pages '<FortiGate> – VPN & users', '<FortiGate> – security & FortiGuard',
+  '<SonicWall> – VPN & security'; Overview table adds IPsec tunnels down, SSL VPN users, FortiGuard days left.
+- Firewall walk items use a 15 s timeout (3 s timed out on the 120G when walks overlapped). Text items are tagged
+  'value: text' and excluded from navigators that feed follow graphs (keeps the dashboard PDF working).
+- 120G: IP-pool walk disabled on the host (FortiOS 7.6 agent never answers that table).
+- `add_firewall_detail.py --rediscover` re-runs the stock discovery rules on the hosts at once (they otherwise pick up
+  new prototypes only on their 1 h heartbeat).
+- Load: ~700 -> ~970 values/s.
+
+### Pi Firewall Fabric: TZ500 GNOC, FortiGate 120G and 200F now fully monitored
+- Sonicwall-TZ500-GNOC moved to 10.128.16.22 (community updated in `/root/.credentials/sonicwall_tz500_snmp_community`);
+  it, GE17-PiSB-Forti120G and Fortigate-200F now answer SNMP and were upgraded from ICMP only to their full templates.
+- `add_firewalls.py`: existing hosts now follow IP / community changes in `DEVICES` or the credential file
+  (`sync_address`); 'FortiGate by SNMP - PIDC' gets `system.net.uptime[sysUpTime.0]` (the stock template only has
+  fgSysUpTime), which `device_uptime.py --setup` turns into the 'Uptime (network)' trapper used by the tiles.
+- Disabled on the hosts only (always unsupported): TZ500 'Health: Outbound discards, all ports' and
+  'SNMP raw: snmpEngineTime' (also on both NSA4600s); 'Free disk percentage' on Forti120G and 200F (no local disk).
+- Still pending: Fortigate-300E (no ping), 1G-VDOM-SW (ping only, SNMP silent).
+
 ## 2026-10-12
 
 ### Daily report e-mails re-enabled

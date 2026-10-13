@@ -35,11 +35,11 @@ DEVICES = [  # host, visible name, IP, model, template (None = switch, by sysObj
      SONICWALL, "sonicwall", "firewall", "sonicwall_nsa_snmp_community"),     # SonicOS 6.5.4.12, HA active
     ("Sonicwall-NSA4600-Secondary", "Sonicwall-NSA4600-Secondary (PIDC-Sonicwall)", "172.20.96.15", "SonicWall NSA 4600",
      SONICWALL, "sonicwall", "firewall", "sonicwall_nsa_snmp_community"),     # HA standby
-    ("Sonicwall-TZ500-GNOC", "Sonicwall-TZ500-GNOC", "192.168.216.1", "SonicWall TZ500",
+    ("Sonicwall-TZ500-GNOC", "Sonicwall-TZ500-GNOC", "10.128.16.22", "SonicWall TZ500",
      SONICWALL, "sonicwall", "firewall", "sonicwall_tz500_snmp_community"),
     ("GE17-PiSB-Forti120G", "GE17-PiSB-Forti120G", "172.28.44.31", "FortiGate 120G",
      FORTIGATE, "fortinet", "firewall", "vmware_fabric_snmp_community"),     # __REDACTED__
-    ("Fortigate-300E", "Fortigate-300E", "172.16.132.127", "FortiGate 300E",
+    ("Fortigate-300E", "Fortigate-300E", "172.16.32.127", "FortiGate 300E",
      FORTIGATE, "fortinet", "firewall", "fortigate_300e_snmp_community"),
     ("Fortigate-200F", "Fortigate-200F", "172.20.117.16", "FortiGate 200F",
      FORTIGATE, "fortinet", "firewall", "fortigate_200f_snmp_community"),
@@ -202,12 +202,32 @@ def setup_fortigate(z):
                               ("fw.vpn.up", "Firewall: VPN tunnels up", "last(//vpn.tunnel.active[fgVpnTunnelUpCount.0])"),
                               ("fw.vpn.users", "Firewall: SSL VPN users", "last(//vpn.users.count[fgVpnSslStatsLoginUsers.0])")):
         item(z, tid, key, name, None, "1m", type=R.CALCULATED, params=params)
+    # the stock template only has fgSysUpTime; device_uptime.py --setup turns this one into the trapper
+    # 'Uptime (network)' used by the dashboard tiles (as on every other PIDC template)
+    if not z.call("item.get", {"templateids": tid, "filter": {"key_": "system.net.uptime[sysUpTime.0]"},
+                               "output": ["itemid"]}):
+        item(z, tid, "system.net.uptime[sysUpTime.0]", "Uptime (network)", "1.3.6.1.2.1.1.3.0", "5m",
+             units="uptime", trends="0", preprocessing=R.pp((base.MULTIPLIER, "0.01")),
+             tags=[{"tag": "component", "value": "system"}])
     fab.HEALTH[FORTIGATE] = {"cpu": "last(//system.cpu.util[fgSysCpuUsage.0])",
                              "mem": "last(//vm.memory.util[memoryUsedPercentage.0])", "fan_ok": 1, "psu_ok": 1}
     fab.health_items(z, FORTIGATE)
 
 
 # ---------------------------------------------------------------------------------------------------- hosts
+def sync_address(z, hostid, host, ip, community):
+    """Existing host: follow IP / community changes made in DEVICES or the credential file."""
+    for i in z.call("hostinterface.get", {"hostids": hostid, "filter": {"type": 2, "main": 1},
+                                          "output": ["interfaceid", "ip"]}):
+        if i["ip"] != ip:
+            z.call("hostinterface.update", {"interfaceid": i["interfaceid"], "ip": ip})
+            print(f"{host}: SNMP interface IP {i['ip']} -> {ip}")
+    for m in z.call("usermacro.get", {"hostids": hostid, "filter": {"macro": "{$SNMP_COMMUNITY}"},
+                                      "output": ["hostmacroid", "value", "type"]}):
+        if m["type"] == "1" or m["value"] != community:   # secret macros read back empty: always rewrite
+            z.call("usermacro.update", {"hostmacroid": m["hostmacroid"], "value": community})
+
+
 def ensure_host(z, gid, dev):
     host, name, ip, model, template, vendor, role, cfile = dev
     community = base.read(CRED + cfile)
@@ -240,6 +260,7 @@ def ensure_host(z, gid, dev):
         print(f"{host}: created - {state}")
         return
     h = found[0]
+    sync_address(z, h["hostid"], host, ip, community)
     linked = {t["host"]: t["templateid"] for t in h["parentTemplates"]}
     if oid and template not in linked:   # SNMP answers now: upgrade from ICMP only (never the other way round)
         if ICMP_ONLY in linked:   # the full templates have their own ICMP items (same keys): unlink + clear first
@@ -257,6 +278,8 @@ def main():
     z = base.Zabbix()
     setup_sonicwall(z)
     setup_fortigate(z)
+    import add_firewall_detail   # VPN / SSL VPN / FortiGuard / security / policy / HA / logging detail
+    add_firewall_detail.main(z)
     t = add_full_coverage.Template(z, SONICWALL)
     for feat in add_full_coverage.FEATURES[SONICWALL]:   # per-port broadcast / multicast, link flaps, FCS errors
         feat(t)

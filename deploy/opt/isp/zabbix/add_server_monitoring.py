@@ -233,8 +233,8 @@ def setup_zabbix(z, mysql_pw, jobs):
     h.dep(al, "pidc.alerts.stuck", "E-mail alerts unsent for over 10 min", [(JSONPATH, "$.stuck")], tags=tag("email"))
     h.dep(al, "pidc.alerts.sent", "E-mail alerts sent (last hour)", [(JSONPATH, "$.sent")], tags=tag("email"))
     h.trigger("E-mail alerts failing to send ({ITEM.LASTVALUE} in the last hour)", f"last({h.k('pidc.alerts.failed')})>0",
-              HIGH, "email", "Alert e-mails are not reaching compute@ / network@. Check Office365 SMTP, the alerts@ "
-                             "password (/root/.credentials/smtp_alerts_password) and Reports > Action log.",
+              HIGH, "email", "Alert e-mails are not reaching compute@ / network@. Check Office365 SMTP, the sender "
+                             "mailbox/password (/root/.credentials/smtp_sender, smtp_password) and Reports > Action log.",
               recovery_mode=1, recovery_expression=f"last({h.k('pidc.alerts.failed')})=0")
     h.trigger("E-mail alerts stuck unsent ({ITEM.LASTVALUE})", f"min({h.k('pidc.alerts.stuck')},5m)>0", HIGH, "email")
     h.item("net.tcp.service[tcp,smtp.office365.com,587]", "SMTP server smtp.office365.com:587 reachable", type=SIMPLE,

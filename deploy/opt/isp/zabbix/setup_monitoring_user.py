@@ -6,6 +6,7 @@
   Reports menus only, no configuration or administration.
 - User MONITOR_USER with an Office365 e-mail media to MONITOR_EMAIL, all severities. The alert actions
   (setup_email_alerts.py, add_ssl_monitoring.py) add this user to their recipients via alert_userids().
+  Alerts only (user request 2026-10-13): daily PDF reports go to the Admin media (compute@ / network@), not here.
 - Every dashboard is shared read-only with MONITOR_GROUP (they are private to Admin otherwise).
 Password: generated once and kept in /root/.credentials/zabbix_pi_monitoring (never reset by re-runs).
 Cron /etc/cron.d/zabbix-monitoring-user re-runs it hourly so new host groups and dashboards are covered.
