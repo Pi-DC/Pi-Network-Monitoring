@@ -53,6 +53,7 @@
 644 root root /opt/isp/backup/build_fabric_dashboard.py.20261012-fw
 644 root root /opt/isp/backup/build_firewall_dashboard.py.20261013
 750 root root /opt/isp/backup/build_switch_dashboard.py.20261012
+644 root root /opt/isp/backup/cron-zabbix-daily-reports.20261013
 750 root root /opt/isp/backup/customer_view.py.20261012-mon
 700 root root /opt/isp/backup/manual-auth-hook.sh.20261013-sender
 700 root root /opt/isp/backup/manual-auth-hook.sh.20261013-subject
