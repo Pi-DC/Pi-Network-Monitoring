@@ -1,0 +1,3 @@
+# One template per device model: new devices are moved from their vendor template onto "<vendor> <model> by SNMP - PIDC".
+# Script: /opt/isp/zabbix/model_templates.py (dry run without --apply).
+50 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py model_templates -- /usr/bin/python3 model_templates.py --apply >> /var/log/zabbix/model-templates.log 2>&1

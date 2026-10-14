@@ -214,6 +214,16 @@ def setup_zabbix(z, mysql_pw, jobs):
     h.dep(apt, "pidc.apt.pending", "OS: updates pending", [(REGEX, r"^(\d+);\d+" + "\n\\1")], tags=tag("os"))
     h.dep(apt, "pidc.apt.security", "OS: security updates pending", [(REGEX, r"^\d+;(\d+)" + "\n\\1")], tags=tag("os"))
     h.trigger("Security updates pending for 3 days ({ITEM.LASTVALUE})", f"min({h.k('pidc.apt.security')},3d)>0", WARN, "os")
+    # The stock 'High swap space usage' (<50 % free) is only a Warning, so it did not e-mail on 2026-10-13: a PDF
+    # render filled RAM + swap at 22:20, MariaDB stalled from 23:40 and cron jobs failed until a reboot at 00:26.
+    h.trigger("Swap almost full ({ITEM.LASTVALUE} free) - server running out of memory",
+              f"max({h.k('system.swap.size[,pfree]')},5m)<10 and last({h.k('system.swap.size[,total]')})>0", HIGH, "memory",
+              "RAM and swap are nearly used up: the database will stall and cron jobs / alerts start failing. Find the "
+              "process holding memory (ps -eo pid,rss,etime,cmd --sort=-rss | head) and stop it before it gets worse.")
+    h.trigger("Available memory below 10% for 10 min ({ITEM.LASTVALUE})",
+              f"max({h.k('vm.memory.size[pavailable]')},10m)<10", HIGH, "memory",
+              "Less than 10 % of RAM is available (free + reclaimable cache). Find the process holding memory "
+              "(ps -eo pid,rss,etime,cmd --sort=-rss | head).")
     h.item("vfs.file.exists[/etc/pi-netmon-watchdog.disable]", "Watchdog paused (/etc/pi-netmon-watchdog.disable)",
            delay="5m", trends="0", tags=tag("cron"))
     h.trigger("Self-healing watchdog paused for over 1 hour",

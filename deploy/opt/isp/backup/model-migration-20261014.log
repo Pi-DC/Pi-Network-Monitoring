@@ -1,0 +1,79 @@
+100G_Spine_SW-1              Arista by SNMP - PIDC          -> Arista DCS-7280CR-48 by SNMP - PIDC
+  + template Arista DCS-7280CR-48 by SNMP - PIDC
+100G_Spine_SW-2              Arista by SNMP - PIDC          -> Arista DCS-7280CR-48 by SNMP - PIDC
+10G-WAN-Switch01             Arista by SNMP - PIDC          -> Arista DCS-7150S-24 by SNMP - PIDC
+  + template Arista DCS-7150S-24 by SNMP - PIDC
+10G-WAN-Switch02             Arista by SNMP - PIDC          -> Arista DCS-7150S-24 by SNMP - PIDC
+10G_Leaf_SW-3-4              Huawei VRP by SNMP - PIDC      -> Huawei S6720S-26Q-EI-24S by SNMP - PIDC
+  + template Huawei S6720S-26Q-EI-24S by SNMP - PIDC
+10G_Leaf_SW-5                Arista by SNMP - PIDC          -> Arista DCS-7150S-24 by SNMP - PIDC
+10G_Leaf_SW-6                Arista by SNMP - PIDC          -> Arista DCS-7150S-24 by SNMP - PIDC
+10G_Leaf_SW-7-8              HPE Comware by SNMP - PIDC     -> HPE 5820AF-24XG by SNMP - PIDC
+  + template HPE 5820AF-24XG by SNMP - PIDC
+1G-COLO-DH4-SW1              Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C3650-24TS-E by SNMP - PIDC
+  + template Cisco Catalyst WS-C3650-24TS-E by SNMP - PIDC
+1G-COLO-DH5-SW1              Huawei VRP by SNMP - PIDC      -> Huawei S5720-28P-PWR-LI by SNMP - PIDC
+  + template Huawei S5720-28P-PWR-LI by SNMP - PIDC
+1G-COLO-DH5-SW2              Huawei VRP by SNMP - PIDC      -> Huawei S5720-28P-PWR-LI by SNMP - PIDC
+1G-COLO-DH5-SW3              Huawei VRP by SNMP - PIDC      -> Huawei S5720-28X-PWR-LI by SNMP - PIDC
+  + template Huawei S5720-28X-PWR-LI by SNMP - PIDC
+1G-COLO-DH5-SW5              Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C3650-48FQ-E by SNMP - PIDC
+  + template Cisco Catalyst WS-C3650-48FQ-E by SNMP - PIDC
+1G-Prod-SW                   Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C3650-48TS-S by SNMP - PIDC
+  + template Cisco Catalyst WS-C3650-48TS-S by SNMP - PIDC
+1G-VDOM-SW                   Cisco Nexus by SNMP - PIDC     -> Cisco Nexus N3K-C3048TP-1GE by SNMP - PIDC
+  + template Cisco Nexus N3K-C3048TP-1GE by SNMP - PIDC
+1G-WAN-Extension-SW          Juniper by SNMP - PIDC         -> Juniper EX3400-24T by SNMP - PIDC
+  + template Juniper EX3400-24T by SNMP - PIDC
+1G-WAN-SW                    Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C3650-24TS-S by SNMP - PIDC
+  + template Cisco Catalyst WS-C3650-24TS-S by SNMP - PIDC
+25G_Leaf_SW-1                Arista by SNMP - PIDC          -> Arista DCS-7050SX3-48YC12 by SNMP - PIDC
+  + template Arista DCS-7050SX3-48YC12 by SNMP - PIDC
+25G_Leaf_SW-2                Arista by SNMP - PIDC          -> Arista DCS-7050SX3-48YC12 by SNMP - PIDC
+A10-LLB                      Generic by SNMP                -> A10 Thunder by SNMP - PIDC
+  + template A10 Thunder by SNMP - PIDC
+AdminCoreSW                  Huawei VRP by SNMP - PIDC      -> Huawei S5720-28P-PWR-LI by SNMP - PIDC
+DH5_CC_SW1                   Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960+48TC-S by SNMP - PIDC
+Traceback (most recent call last):
+  File "/opt/isp/zabbix/model_templates.py", line 166, in <module>
+    main()
+  File "/opt/isp/zabbix/model_templates.py", line 156, in main
+    tid, created = ensure_template(z, vendor, model)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/isp/zabbix/model_templates.py", line 122, in ensure_template
+    tid = z.call("template.create", {
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/isp/zabbix/setup_isp_links.py", line 71, in call
+    raise RuntimeError(f"{method}: {resp['error']['data']}")
+RuntimeError: template.create: Invalid parameter "/1/host": invalid host name.
+DH5_CC_SW1                   Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960+48TC-S by SNMP - PIDC
+  + template Cisco Catalyst WS-C2960+48TC-S by SNMP - PIDC
+DH5_CC_SW2                   Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960S-48TS-L by SNMP - PIDC
+  + template Cisco Catalyst WS-C2960S-48TS-L by SNMP - PIDC
+DH5_CC_SW3                   Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C4948 by SNMP - PIDC
+  + template Cisco Catalyst WS-C4948 by SNMP - PIDC
+DH5_CC_SW4                   Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C4948 by SNMP - PIDC
+Fortigate-200F               FortiGate by SNMP - PIDC       -> FortiGate 200F by SNMP - PIDC
+  + template FortiGate 200F by SNMP - PIDC
+Fortigate-300E               FortiGate by SNMP - PIDC       -> FortiGate 300E by SNMP - PIDC
+  + template FortiGate 300E by SNMP - PIDC
+GE17-PiSB-Forti120G          FortiGate by SNMP - PIDC       -> FortiGate 120G by SNMP - PIDC
+  + template FortiGate 120G by SNMP - PIDC
+GE17-PiSB-SP1                Arista by SNMP - PIDC          -> Arista DCS-7060CX2-32S by SNMP - PIDC
+  + template Arista DCS-7060CX2-32S by SNMP - PIDC
+GE17-PiSB-SP2                Arista by SNMP - PIDC          -> Arista DCS-7060CX2-32S by SNMP - PIDC
+GE18-PiSB-LF1                Arista by SNMP - PIDC          -> Arista DCS-7150S-52-CL by SNMP - PIDC
+  + template Arista DCS-7150S-52-CL by SNMP - PIDC
+GE18-PiSB-LF2                Arista by SNMP - PIDC          -> Arista DCS-7150S-52-CL by SNMP - PIDC
+H1-SPINE3-4                  Huawei VRP by SNMP - PIDC      -> Huawei S6720S-26Q-EI-24S by SNMP - PIDC
+MMR1_CC_SW1                  Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960+48TC-S by SNMP - PIDC
+MMR1_CC_SW2                  Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960S-48TS-L by SNMP - PIDC
+MMR1_CC_SW3                  Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960S-48TS-L by SNMP - PIDC
+MMR1_CC_SW4                  Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C4948 by SNMP - PIDC
+MMR1_CC_SW5                  Cisco Catalyst by SNMP - PIDC  -> Cisco Catalyst WS-C2960X-48TD-L by SNMP - PIDC
+  + template Cisco Catalyst WS-C2960X-48TD-L by SNMP - PIDC
+Sonicwall-NSA4600-Primary    SonicWall by SNMP - PIDC       -> SonicWall NSA 4600 by SNMP - PIDC
+  + template SonicWall NSA 4600 by SNMP - PIDC
+Sonicwall-NSA4600-Secondary  SonicWall by SNMP - PIDC       -> SonicWall NSA 4600 by SNMP - PIDC
+Sonicwall-TZ500-GNOC         SonicWall by SNMP - PIDC       -> SonicWall TZ 500 by SNMP - PIDC
+  + template SonicWall TZ 500 by SNMP - PIDC

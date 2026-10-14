@@ -4,7 +4,7 @@
 - Enables Zabbix's built-in "Office365" media type with the sender mailbox in SENDER_FILE (password in
   PASSWORD_FILE); every mailer (daily reports, watchdog, SSL renewal hook) reads the same two files.
 - Gives the Admin user an email media for that address.
-- Creates the "ISP link alerts" action: problems of severity Average or higher on A10-LLB, on the Zabbix server
+- Creates the "ISP link alerts" action: problems of severity Warning or higher (Average until 2026-10-14) on A10-LLB, on the Zabbix server
   itself (caches, memory, disk) or on any host in
   any host in the switch/router groups (WAN Switches, PiSB Cloud Switches, WAN Routers, Pi VMware Fabric), plus recovery.
   Lower severities (packet loss / latency / 80% utilisation warnings) are left on the dashboards only,
@@ -27,7 +27,7 @@ SENDER = base.read(SENDER_FILE)
 SUBJECT_PREFIX = "[Network-Monitoring] "
 RECIPIENTS = ["compute@pidatacenters.com", "network@pidatacenters.com"]
 ACTION = "ISP link alerts"
-MIN_SEVERITY = "3"   # 3 = Average; 4 = High; 5 = Disaster
+MIN_SEVERITY = "2"   # 2 = Warning (user, 2026-10-14: e-mail Warnings too; was 3 = Average)
 SWITCH_GROUPS = ["WAN Switches", "PiSB Cloud Switches", "WAN Routers", "Pi VMware Fabric", "Pi MMR Cross Connect Fabric",
                  "Pi DH Cross Connect Fabric", "Pi 1G Colo Fabric", "H1 Colo Fabric", "1G Prod Fabric",
                  "Admin Core Fabric", "Pi Firewall Fabric"]

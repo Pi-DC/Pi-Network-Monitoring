@@ -42,7 +42,7 @@ FW_TILES = [("Firewall: Active sessions", "sessions", 0, ()),
 # model / serial / firmware (text) per vendor
 INFO = {"sonicwall": ["SonicWall: Model", "SonicWall: Serial number", "SonicWall: Firmware version", "SonicWall: ROM version"],
         "fortinet": ["Hardware model name", "Hardware serial number", "Firmware version", "HA mode"]}
-NUMERIC_ITEMS = ["Firewall: *", "CPU utilization", "Memory utilization", "Health: CPU utilization",
+NUMERIC_ITEMS = ["Firewall: *", "Memory: *", "Processor module *", "Log partition*", "BGP peer *", "CPU utilization", "Memory utilization", "Health: CPU utilization",
                  "Health: Memory utilization", "ICMP response time", "ICMP loss"]
 
 
@@ -82,6 +82,27 @@ def firewall_table(name, x, y, w, h, groupid):
     return d.widget("tophosts", name, x, y, w, h, fields)
 
 
+def session_series(items):
+    """SonicWall has one session table; FortiGate reports the ephemeral and NPU (offload) tables instead."""
+    if "Firewall: Session table use" in items:
+        return [{"items": ["Firewall: Session table use"], "color": "7C3AED", "label": "% used", "fill": 2}]
+    return [{"items": [n], "color": c, "label": label, **extra}
+            for n, c, label, extra in (("Firewall: ephemeral session table use", "7C3AED", "ephemeral", {"fill": 2}),
+                                       ("Firewall: NPU session table use", "0EA5E9", "NPU", {"width": 1}))
+            if n in items]
+
+
+def vpn_traffic_graph(items, me, y):
+    """SonicWall: encrypted / decrypted totals; FortiGate: IPsec in / out over all tunnels."""
+    if "IPsec: traffic in (all tunnels)" in items and not any(n.startswith("Firewall: VPN traffic") for n in items):
+        return sw.svg("IPsec traffic, all tunnels (in filled, out line)", 0, y, 36, 10, me, [
+            {"items": ["IPsec: traffic in (all tunnels)"], "color": "2563EB", "label": "in", "fill": 2},
+            {"items": ["IPsec: traffic out (all tunnels)"], "color": "F59E0B", "label": "out", "width": 1}])
+    return sw.svg("VPN traffic (encrypted into tunnels filled, decrypted from tunnels line)", 0, y, 36, 10, me, [
+        {"items": ["Firewall: VPN traffic encrypted*"], "color": "2563EB", "label": "encrypted", "fill": 2},
+        {"items": ["Firewall: VPN traffic decrypted*"], "color": "F59E0B", "label": "decrypted", "width": 1}])
+
+
 def firewall_page(z, h, page_no):
     items, me, hid = items_by_name(z, h), [h["name"]], h["hostid"]
     ref = sw.page_ref("FWI", page_no)
@@ -94,8 +115,7 @@ def firewall_page(z, h, page_no):
     w += [sw.svg("Active sessions and NAT translations", 0, y, 36, 10, me, [
               {"items": ["Firewall: Active sessions"], "color": "2563EB", "label": "sessions", "fill": 2},
               {"items": ["Firewall: NAT translations"], "color": "F59E0B", "label": "NAT", "width": 1}]),
-          sw.svg("Session table use (%)", 36, y, 36, 10, me, [
-              {"items": ["Firewall: Session table use"], "color": "7C3AED", "label": "% used", "fill": 2}])]
+          sw.svg("Session table use (%)", 36, y, 36, 10, me, session_series(items))]
     y += 10
     w += [sw.svg("CPU: total, forwarding + inspection, management (%)", 0, y, 36, 10, me, [
               {"items": ["Health: CPU utilization"], "color": "2563EB", "label": "total"},
@@ -106,9 +126,7 @@ def firewall_page(z, h, page_no):
               {"items": ["Health: Memory utilization"], "color": "7C3AED", "label": "memory", "fill": 2}],
               extra=[f(INT, "lefty_max", 100)])]
     y += 10
-    w += [sw.svg("VPN traffic (encrypted into tunnels filled, decrypted from tunnels line)", 0, y, 36, 10, me, [
-              {"items": ["Firewall: VPN traffic encrypted*"], "color": "2563EB", "label": "encrypted", "fill": 2},
-              {"items": ["Firewall: VPN traffic decrypted*"], "color": "F59E0B", "label": "decrypted", "width": 1}]),
+    w += [vpn_traffic_graph(items, me, y),
           sw.svg("VPN tunnels / peers / users", 36, y, 36, 10, me, [
               {"items": ["Firewall: VPN tunnels up*"], "color": "16A34A", "label": "tunnels / SAs up"},
               {"items": ["Firewall: VPN peers", "Firewall: SSL VPN users"], "color": "0EA5E9", "label": "peers / users"}])]
@@ -124,6 +142,13 @@ def firewall_page(z, h, page_no):
                                                                 for k in range(n)), y, name.split(": ")[-1],
                          w=iw, decimals=0, value_size=12))
     y += 3 if info else 0
+    peers = len([n for n in items if n.startswith("BGP peer ") and n.endswith(": state")])
+    if peers:   # BGP4-MIB peers (add_model_items.py)
+        mh = min(sw.map_rows(peers, 72, 3, 8), 64 - y - 4)
+        w.append(sw.honeycomb(f"BGP peers ({peers}: green established, red not established)", 0, y, 72, mh, hid,
+                              "BGP peer *: state", ((0, RED), (6, GREEN)),
+                              label='{{ITEM.NAME}.regsub("^BGP peer ([^ ]+) .*", "\\1")}'))
+        y += mh
     w.append(sw.problems(f"{fd.short(h)} problems", 0, y, 72, 64 - y, hostid=hid))
     return {"name": f"{fd.short(h)} – firewall", "widgets": w}
 
@@ -143,7 +168,10 @@ def history(name, x, y, w, h, itemid, column, lines=5):
     return d.widget("itemhistory", name, x, y, w, h, [
         f(STR, "columns.0.name", column), f(d.ITEM, "columns.0.itemid", itemid), f(INT, "columns.0.display", 1),
         f(INT, "columns.0.monospace_font", 1), f(INT, "show_lines", lines), f(INT, "show_timestamp", 1),
-        f(INT, "sortorder", 0), f(INT, "show_column_header", 0), f(INT, "rf_rate", 60)])
+        f(INT, "sortorder", 0), f(INT, "show_column_header", 0), f(INT, "rf_rate", 60),
+        # own period: these items store a value only on change (1-day heartbeat), so the dashboard's default
+        # 1-hour period showed "No data found" for most of the day
+        f(STR, "time_period.from", "now-7d"), f(STR, "time_period.to", "now")])
 
 
 def navigator2(name, x, y, w, h, hostid, patterns, tags, ref, lines=3000):

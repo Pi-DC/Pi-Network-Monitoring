@@ -146,7 +146,7 @@ def main():
                       0, 40, 36, 8, hid,
                       ["ICMP ping", "ICMP response time", "*: CPU utilization", "Processor: Memory utilization",
                        "Uptime (network)", "*Power supply status", "*Fan tray status", "*: Temperature", "*: Voltage", "*: Current",
-                       "*: Optical power"], "component", lines=150, rate=60, ref=hw_ref),
+                       "*: Optical power", "Chassis: *"], "component", lines=150, rate=60, ref=hw_ref),
             sw.follow_graph("Graph of the health / hardware item selected on the left", 36, 40, 36, 8, hw_ref),
             sw.svg("CPU and memory", 0, 48, 24, 5, me, [
                 {"items": ["*: CPU utilization"], "color": "2563EB", "label": "CPU %"},
@@ -163,13 +163,13 @@ def main():
                 {"items": ["*transceiver * Temperature Sensor: Temperature"], "color": "7C3AED", "label": "Optics",
                  "width": 1}], legend_lines=8),
             sw.svg("In errors/s (all ports)", 0, 53, 18, 5, me, [
-                {"items": ["Interface *: Inbound packets with errors"], "color": RED, "label": "In errors", "agg": 5}]),
+                {"items": ["Health: Inbound errors, all ports"], "color": RED, "label": "In errors"}]),
             sw.svg("Out errors/s (all ports)", 18, 53, 18, 5, me, [
-                {"items": ["Interface *: Outbound packets with errors"], "color": "F97316", "label": "Out errors", "agg": 5}]),
+                {"items": ["Health: Outbound errors, all ports"], "color": "F97316", "label": "Out errors"}]),
             sw.svg("In discards/s (all ports)", 36, 53, 18, 5, me, [
-                {"items": ["Interface *: Inbound packets discarded"], "color": "7C3AED", "label": "In discards", "agg": 5}]),
+                {"items": ["Health: Inbound discards, all ports"], "color": "7C3AED", "label": "In discards"}]),
             sw.svg("Out discards/s (all ports)", 54, 53, 18, 5, me, [
-                {"items": ["Interface *: Outbound packets discarded"], "color": "0EA5E9", "label": "Out discards", "agg": 5}]),
+                {"items": ["Health: Outbound discards, all ports"], "color": "0EA5E9", "label": "Out discards"}]),
             sw.problems(f"{short} problems", 0, 58, 72, 6, hostid=hid),
         ]
         pages.append({"name": f"{host} ({short})", "widgets": w})

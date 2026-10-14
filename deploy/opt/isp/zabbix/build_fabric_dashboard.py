@@ -112,6 +112,19 @@ def short(h):
     return re.sub(r"^(100G_|(25|10)G[-_](?=Leaf)|MMR1[-_](CC_)?|DH5[-_](CC_)?|1G-COLO-|1G-(?=Prod)|Admin(?=Core)|H1-|Sonicwall-)", "", h["host"]).replace("_SW-", " ")   # Spine 1, Leaf 7-8, SW5, SPINE3-4, Prod-SW, CoreSW, NSA4600-Primary
 
 
+FULL_IF = '{{ITEM.NAME}.regsub("^Interface ([^(]+)", "\\1")}'   # whole interface name: port1, x1, mgmt
+NOT_PORTS = ("npu", "modem")   # FortiGate internal NPU links and the (unused) modem interface
+
+
+def physical_ports(z, h):
+    """Names of the physical ports (ifType 6, ethernetCsmacd) from the 'Interface X(...): Interface type' items."""
+    its = z.call("item.get", {"hostids": h["hostid"], "output": ["name", "lastvalue"], "filter": {"status": 0},
+                              "search": {"name": "Interface *: Interface type"}, "searchWildcardsEnabled": True})
+    names = {i["name"][len("Interface "):].split("(")[0] for i in its if i["lastvalue"] == "6"}
+    return sorted((n for n in names if not n.startswith(NOT_PORTS)),
+                  key=lambda n: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", n)])
+
+
 def switch_page(z, h, page_no, ports, page_name=None):
     """One switch page (vendor-neutral "Health: ..." items; the vendor tag picks port-channel / hardware patterns).
     `h` = host with tags, `ports` = its number of ports, `page_no` keeps the widget references unique."""
@@ -136,28 +149,59 @@ def switch_page(z, h, page_no, ports, page_name=None):
     w = [sw.tile(label, health_item(z, h, item), sum(widths[:n]), 0, label, w=widths[n], decimals=dec, th=th,
                  value_size=16 if label in ("uptime", "latency") else 22)
          for n, (item, label, dec, th) in enumerate(tiles)]
+    # firewalls report every VLAN / IPsec tunnel / SSL VPN interface too (Fortigate-200F: 246, 33 physical): with
+    # all of them the cells get too small for labels (colours only), so the maps show the physical ports only
+    phys = physical_ports(z, h) if tag(h, "vendor") == "fortinet" else None
+    state_items = [f"Interface {p}(*: Port state" for p in phys] if phys else sw.IF_STATE_ITEMS
+    traffic_items = [f"Interface {p}(*: Bits received" for p in phys] if phys else "Interface *: Bits received"
+    label = FULL_IF if phys else None
+    if phys:
+        big = len(phys) > 80
     sm, tm = (9, 7) if big else (6, 5)   # map heights: larger switches need bigger cells for readable labels
     y = 3
     w += [sw.honeycomb(f"Interface status ({sw.MAP_LEGEND}) - click a port to graph it", 0, y, 72, sm, hid,
-                       sw.IF_STATE_ITEMS, sw.IF_STATUS_TH, ref=st_ref),
+                       state_items, sw.IF_STATUS_TH, ref=st_ref, label=label),
           sw.follow_graph("Port state of the port clicked above (1 up, 2 down, 6 no module, 8 shutdown)",
                           0, y + sm, 72, 5, st_ref)]
     y += sm + 5
     w += [sw.honeycomb("Traffic in now, per interface - click a port to graph it", 0, y, 72, tm, hid,
-                       "Interface *: Bits received", sw.TRAFFIC_TH, ref=tr_ref),
+                       traffic_items, sw.TRAFFIC_TH, ref=tr_ref, label=label),
           sw.follow_graph("Traffic in of the port clicked above", 0, y + tm, 72, 5, tr_ref)]
     y += tm + 5
-    w.append(sw.svg(vendor.get("lag_title", "Port-channel traffic (in filled, out lines)"), 0, y, 72, 6, me, [
-        {"items": [vendor["lag"] + ": Bits received"], "color": "2563EB", "label": "in", "fill": 2},
-        {"items": [vendor["lag"] + ": Bits sent"], "color": "F59E0B", "label": "out", "width": 1}],
-        legend_lines=10))
+    lags = int(z.call("item.get", {"hostids": hid, "search": {"name": vendor["lag"] + ": Bits received"},
+                                   "searchWildcardsEnabled": True, "filter": {"status": 0}, "countOutput": True}))
+    lag_in = {"items": [vendor["lag"] + ": Bits received"], "color": "2563EB", "label": "in", "fill": 2}
+    lag_out = {"items": [vendor["lag"] + ": Bits sent"], "color": "F59E0B", "label": "out", "width": 1}
+    # one SVG graph plots at most 50 items (the rest is dropped silently): split in / out when both do not fit
+    if 0 < 2 * lags <= sw.MAX_GRAPH_ITEMS:
+        w.append(sw.svg(vendor.get("lag_title", "Port-channel traffic (in filled, out lines)"), 0, y, 72, 6, me,
+                        [lag_in, lag_out], legend_lines=10))
+    elif lags:
+        title = vendor.get("lag_title", "Port-channel traffic").split(" (")[0]
+        w += [sw.svg(f"{title} in", 0, y, 36, 6, me, [lag_in], legend_lines=10),
+              sw.svg(f"{title} out", 36, y, 36, 6, me, [{**lag_out, "width": 2}], legend_lines=10)]
+    else:   # no port-channel on this switch: show the sum over all ports (server-side items, add_port_totals.py)
+        w.append(sw.svg("Traffic, sum of all ports (no port-channels on this switch; in filled, out line)",
+                        0, y, 72, 6, me, [
+            {"items": ["Ports total: bits received"], "color": "2563EB", "label": "in, all ports", "fill": 2},
+            {"items": ["Ports total: bits sent"], "color": "F59E0B", "label": "out, all ports", "width": 1}]))
     y += 6
     w += [navigator("Interfaces (status, traffic, errors) by port - click an item to graph it", 0, y, 36, 9, hid,
                     ["Interface *"], "interface", if_ref),
           sw.follow_graph("Graph of the interface item selected on the left", 36, y, 36, 9, if_ref)]
     y += 9
+    # model-specific hardware states (chassis alarms, power supplies, fan trays, modules, yellow alarm), if any
+    n_hw = int(z.call("item.get", {"hostids": hid, "filter": {"status": 0}, "countOutput": True,
+                                   "search": {"name": sw.HW_STATE_ITEMS}, "searchByAny": True,
+                                   "searchWildcardsEnabled": True}))
+    if n_hw:
+        hh = 3 if n_hw <= 24 else 4
+        w.append(sw.honeycomb("Hardware status (green OK / red fault: chassis alarms, power supplies, fan trays, "
+                              "modules)", 0, y, 72, hh, hid, sw.HW_STATE_ITEMS, sw.HW_STATE_TH, label=sw.STATE_LABEL))
+        y += hh
     w += [navigator("Health and hardware (tiles above, CPU, memory, temperatures, fans, power) - click an item "
-                    "to graph it", 0, y, 36, 8, hid, HEALTH_ITEMS + vendor["hw"], "component", hw_ref,
+                    "to graph it", 0, y, 36, 8, hid, HEALTH_ITEMS + vendor["hw"] + sw.HW_STATE_ITEMS
+                    + ["Fan *: status"], "component", hw_ref,
                     lines=300, rate=60),
           sw.follow_graph("Graph of the health / hardware item selected on the left", 36, y, 36, 8, hw_ref)]
     y += 8

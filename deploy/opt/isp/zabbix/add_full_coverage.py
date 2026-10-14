@@ -104,7 +104,8 @@ class Template:
         if key not in self.rules:
             self.rules[key] = self.z.call("discoveryrule.create", {
                 "hostid": self.tid, "key_": key, "name": name, "type": DEPENDENT, "master_itemid": master,
-                "lifetime": "7d", "preprocessing": base.pp((JS, js(body)), (DISCARD_HB, "1h")), **kw})["itemids"][0]
+                "lifetime": "30d", "enabled_lifetime_type": 1,   # lost entities keep alerting (never disabled)
+                "preprocessing": base.pp((JS, js(body)), (DISCARD_HB, "1h")), **kw})["itemids"][0]
             self.n["rules"] += 1
         return self.rules[key]
 

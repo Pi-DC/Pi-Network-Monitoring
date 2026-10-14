@@ -15,6 +15,7 @@ SNMP v2c community: /root/.credentials/vmware_fabric_snmp_community. Idempotent.
 """
 import add_routers
 import add_switches
+import model_templates
 import setup_isp_links as base
 import tune_arista_template
 
@@ -219,7 +220,9 @@ def sync_host(z, hostid, name, template, vendor, enabled):
     update = {}
     if h["name"] != name:
         update["name"] = name
-    if [t["name"] for t in h["parentTemplates"]] != [template]:
+    # a host on its model template (model_templates.py: the vendor template nested in it) is on the right template
+    if [t["name"] for t in h["parentTemplates"]] != [template] and not (
+            len(h["parentTemplates"]) == 1 and model_templates.uses_template(z, h["parentTemplates"], template)):
         update["templates"] = [{"templateid": template_id(z, template)}]
         update["templates_clear"] = [{"templateid": t["templateid"]} for t in h["parentTemplates"]
                                      if t["name"] != template]

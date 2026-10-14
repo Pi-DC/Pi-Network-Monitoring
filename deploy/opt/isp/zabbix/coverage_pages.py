@@ -114,11 +114,16 @@ def links_page(z, hosts, page_no, title="Links, optics & stack"):
     if not pairs and not count(z, hostids, "LLDP neighbours"):
         return None
 
-    # maps two per row (full width when alone), each with the graph of its clicked cell below
-    for i in range(0, len(pairs), 2):
-        row = pairs[i:i + 2]
+    # maps two per row (full width when alone, or when half width cannot keep the labels readable - Zabbix then
+    # draws colours only, e.g. 180 optics on the VMware fabric), each with the graph of its clicked cell below
+    rows, half = [], [p for p in pairs if sw.label_room(p[3], 36, 8) >= sw.LABEL_PX]
+    for p in pairs:
+        if p not in half:
+            rows.append([p])
+    rows += [half[i:i + 2] for i in range(0, len(half), 2)]
+    for row in rows:
         width = 72 // len(row)
-        mh = max(map_height(p[3], width) for p in row)
+        mh = max(map_height(p[3], width, hi=8 if width < 72 else 12) for p in row)
         for j, (pats, lab, th, n, name, prefix) in enumerate(row):
             r = ref(prefix)
             w.append(hmap(name, j * width, y, width, mh, hostids, pats, lab, th, r, multi))
@@ -139,10 +144,10 @@ def links_page(z, hosts, page_no, title="Links, optics & stack"):
     y += 12
     if count(z, hostids, "Interface *: Broadcast received*"):
         w.append(sw.svg("Broadcast packets received per second, all ports (one line per switch)", 0, y, 36, 5, names, [
-            {"items": ["Interface *: Broadcast received"], "hosts": [n], "color": c, "label": n, "agg": 5}
+            {"items": ["Ports total: broadcast received"], "hosts": [n], "color": c, "label": n}
             for n, c in zip(names, PALETTE)], legend_lines=min(10, len(names))))
         w.append(sw.svg("FCS / CRC errors per 5 min, all ports (one line per switch)", 36, y, 36, 5, names, [
-            {"items": ["Interface *: FCS/CRC errors*"], "hosts": [n], "color": c, "label": n, "agg": 5}
+            {"items": ["Ports total: FCS/CRC errors"], "hosts": [n], "color": c, "label": n}
             for n, c in zip(names, PALETTE)], legend_lines=min(10, len(names))))
         y += 5
     if y > 64:   # dashboard grid limit: drop the lowest widgets rather than fail

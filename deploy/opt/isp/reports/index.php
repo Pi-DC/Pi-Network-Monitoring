@@ -22,6 +22,7 @@ const AGGS = ['avg' => 'Average', 'min' => 'Minimum', 'max' => 'Maximum'];
 const WEB_SERVICE = 'http://127.0.0.1:10053/report';     // zabbix-web-service (headless Chrome), also used by Zabbix scheduled reports
 const FRONTEND = 'http://127.0.0.1/zabbix/';             // port 80 is not redirected to HTTPS for 127.0.0.1
 const CHROME = '/usr/bin/google-chrome';
+const PDF_CHROME = '/usr/local/sbin/pdf-chrome';    // Chrome in its own scope: 2 GB RAM, no swap, 4 min (sudo for www-data)
 const PDF_MAX_TABLE_ROWS = 20000;   // data table rows in a PDF (~45 rows per A4 page)
 const PDF_COLS_PER_TABLE = 8;       // value columns per table block, so tables fit A4 landscape
 const CHART_POINTS = 1500;          // charts with more steps than this are drawn per pixel column (min/avg/max kept)
@@ -128,7 +129,11 @@ function readRequest(): array {
     $to = parseTime((string)($_POST['to'] ?? ''));
     if ($to > time()) $to = time();
     if ($from >= $to) throw new InvalidArgumentException('"From" must be before "To".');
-    if ($to - $from > MAX_DAYS * 86400) throw new InvalidArgumentException('Maximum range is ' . MAX_DAYS . ' days.');
+    $notes = [];
+    if ($to - $from > MAX_DAYS * 86400) {   // history is kept MAX_DAYS: report what exists instead of refusing
+        $from = $to - MAX_DAYS * 86400;
+        $notes[] = 'Period shortened to the last ' . MAX_DAYS . ' days: older data is not kept.';
+    }
     $step = (string)($_POST['step'] ?? '60');
     if (!isset(STEPS[$step])) throw new InvalidArgumentException('Invalid step.');
     $aggs = array_values(array_intersect(array_keys(AGGS), (array)($_POST['agg'] ?? [])));
@@ -138,11 +143,6 @@ function readRequest(): array {
     $title = trim(preg_replace('/\s+/', ' ', (string)($_POST['title'] ?? ''))) ?: 'Network data report';
     $title = mb_substr($title, 0, 80);
     $table = !empty($_POST['table']);
-    if ($format === 'pdf' && $step === 'raw') throw new InvalidArgumentException('PDF reports need a step (30 seconds or more), not Raw.');
-    if ($format === 'pdf' && $table && ($to - $from) / (int)$step > PDF_MAX_TABLE_ROWS) {
-        throw new InvalidArgumentException(sprintf('The PDF data table would have %s rows (limit %s, about %d pages). Choose a larger step or shorter period, or untick "Include data table" to get the summary and charts only.',
-            number_format((int)ceil(($to - $from) / (int)$step)), number_format(PDF_MAX_TABLE_ROWS), PDF_MAX_TABLE_ROWS / 45));
-    }
 
     // Permission check: the API returns only items this user may read.
     $items = api('item.get', ['itemids' => $ids, 'output' => ['itemid', 'name', 'units', 'delay', 'value_type', 'key_'],
@@ -158,7 +158,62 @@ function readRequest(): array {
     }
     unset($it);
     usort($items, fn($a, $b) => [$a['host'], $a['name']] <=> [$b['host'], $b['name']]);
-    return compact('items', 'from', 'to', 'step', 'aggs', 'type', 'friendly', 'format', 'title', 'table');
+    return fitRequest(compact('items', 'from', 'to', 'step', 'aggs', 'type', 'friendly', 'format', 'title', 'table', 'notes'));
+}
+
+// Any period, step and format must give a report (user, 2026-10-14). Instead of refusing, a request that would not
+// finish (too many samples to read), not fit in memory or Excel (too many cells) or not print (huge PDF table) is
+// adapted - the finest step that fits, hourly trends for long periods, table left out - and every change is noted on
+// the report itself ($r['notes']).
+const SAMPLE_BUDGET = 30000000;      // raw samples read per report (~3 minutes of database time)
+const PDF_TABLE_CELLS = 1000000;     // PDF data table cells (~5,000 pages); beyond that the table is left out
+function fitRequest(array $r): array {
+    $span = $r['to'] - $r['from'];
+    $label = fn($s) => strtolower(STEPS[$s]);
+    if ($r['format'] === 'pdf' && $r['step'] === 'raw') {
+        $r['step'] = '60';
+        $r['notes'][] = 'PDF reports are made from steps: Raw changed to 1 minute.';
+    }
+    $samples = array_sum(array_map(fn($i) => $span / delaySeconds($i['delay']), $r['items']));
+    $cols = max(1, array_sum(array_map(fn($i) => $i['mapped'] ? 1 : count($r['aggs']), $r['items'])));
+    $cells = fn($s) => (int)ceil($span / (int)$s) * ($r['type'] === 'summary' && $r['format'] === 'csv' ? count($r['items']) : $cols);
+    if ($r['step'] === 'raw' && $samples > MAX_CELLS) {
+        $r['notes'][] = sprintf('Raw would be about %s values: changed to steps.', number_format($samples));
+        $r['step'] = '60';
+    }
+    if ($r['step'] !== 'raw') {
+        $want = $r['step'];
+        foreach (array_keys(STEPS) as $s) {   // finest step (not finer than asked) whose values fit in memory / Excel
+            if ($s === 'raw' || (int)$s < (int)$want) continue;
+            $r['step'] = (string)$s;
+            if ($cells($s) <= MAX_CELLS) break;
+        }
+        if ($r['step'] !== $want) {
+            $r['notes'][] = sprintf('Step changed from %s to %s: at %s the report would have about %s values (limit %s).',
+                $label($want), $label($r['step']), $label($want), number_format($cells($want)), number_format(MAX_CELLS));
+        }
+        if ($samples > SAMPLE_BUDGET) {   // reading every sample would take too long: use the hourly trends
+            if ((int)$r['step'] < 3600) {
+                $r['notes'][] = sprintf('Step changed from %s to 1 hour: the period has about %s samples, so the hourly '
+                    . 'trends are used (min / avg / max per hour; trend hours start at :30 IST).', $label($r['step']),
+                    number_format($samples));
+                $r['step'] = '3600';
+            } else {
+                $r['notes'][] = sprintf('Values come from the hourly trends (the period has about %s samples).', number_format($samples));
+            }
+            $r['trends'] = true;
+        }
+    }
+    if ($r['format'] === 'pdf' && $r['table']) {
+        $rows = (int)ceil($span / (int)$r['step']);
+        if ($rows > PDF_MAX_TABLE_ROWS || $rows * $cols > PDF_TABLE_CELLS) {
+            $r['table'] = false;
+            $r['notes'][] = sprintf('Data table left out of the PDF: it would be %s rows x %s columns (about %s pages). '
+                . 'Summary and charts are complete; download the CSV for the full table.', number_format($rows),
+                number_format($cols), number_format((int)ceil($rows * ceil($cols / PDF_COLS_PER_TABLE) / 45)));
+        }
+    }
+    return $r;
 }
 
 function bucketStart(int $t, int $step): int { return intdiv($t + TZ_OFFSET, $step) * $step - TZ_OFFSET; }
@@ -203,6 +258,8 @@ function seriesHeader(array $r): array {
     $hdr = ['Time (IST)'];
     foreach ($r['items'] as $it) {
         if ($it['mapped']) { $hdr[] = $it['title'] . ($r['step'] === 'raw' ? '' : ' [last]'); continue; }
+        // Raw has one value column per item (seriesRows), whatever aggregations are ticked
+        if ($r['step'] === 'raw') { $hdr[] = $it['title']; continue; }
         foreach ($r['aggs'] as $a) $hdr[] = $it['title'] . (count($r['aggs']) > 1 ? " [$a]" : '');
     }
     return $hdr;
@@ -306,6 +363,7 @@ function download(mysqli $db, array $r): void {
     header('Cache-Control: no-store');
     $out = fopen('php://output', 'w');
     fwrite($out, "\xEF\xBB\xBF");   // BOM so Excel opens UTF-8 correctly
+    foreach ($r['notes'] ?? [] as $note) fputcsv($out, ['Note: ' . $note]);
     if ($r['type'] === 'summary') {
         fputcsv($out, ['Zabbix summary report', describe($r), 'Generated ' . date('d M Y H:i') . ' by ' . $_SESSION['user']]);
         fputcsv($out, []);
@@ -326,14 +384,53 @@ function download(mysqli $db, array $r): void {
 // Same data as the CSV export at the chosen step, laid out for printing: cover, summary table, one chart per item
 // and (optionally) the full table of step values. Rendered to PDF by headless Chrome.
 
+const PDF_PART = '<!--PDF-PART-->';   // reports mark where a big document may be split (see htmlToPdf)
+
+// Renders HTML to PDF with headless Chrome (in its 2 GB scope, see PDF_CHROME). A big report (thousands of charts or
+// table rows) would not fit in one render, so the HTML is cut at its PDF_PART markers, each part is printed by its
+// own Chrome run, and the parts are joined with pdfunite (2026-10-14: a 3,000-item report of the 120G was killed at
+// 2 GB and the page answered HTTP 500).
 function htmlToPdf(string $html): string {
     $dir = sys_get_temp_dir() . '/zbxreport-' . bin2hex(random_bytes(6));
     mkdir($dir, 0700);
     try {
-        file_put_contents("$dir/report.html", $html);
-        run([CHROME, '--headless=new', '--no-sandbox', '--disable-gpu', '--no-pdf-header-footer', '--user-data-dir=' . "$dir/chrome",
-            "--print-to-pdf=$dir/report.pdf", "file://$dir/report.html"], ['HOME' => $dir, 'PATH' => '/usr/bin:/bin']);
-        return file_get_contents("$dir/report.pdf");
+        $b = strpos($html, '<body>');
+        $head = $b === false ? '' : substr($html, 0, $b + 6);
+        $body = $b === false ? $html : substr($html, $b + 6);
+        $body = preg_replace('~</body>\s*</html>\s*$~', '', $body);
+        $chunks = array_values(array_filter(explode(PDF_PART, $body), fn($c) => trim($c) !== ''));
+        // join small neighbouring pieces again, so a short report is still one render
+        $groups = [];
+        foreach ($chunks as $c) {
+            $g = count($groups) - 1;
+            if ($groups && array_sum(array_map('strlen', $groups[$g])) + strlen($c) < 1500000) $groups[$g][] = $c;
+            else $groups[] = [$c];
+        }
+        $render = function (string $part, string $name) use ($dir, $head): bool {
+            file_put_contents("$dir/$name.html", $head . $part . '</body></html>');
+            @unlink("$dir/$name.pdf");
+            try {
+                run([CHROME, '--headless=new', '--no-sandbox', '--disable-gpu', '--no-pdf-header-footer',
+                    '--user-data-dir=' . "$dir/chrome", "--print-to-pdf=$dir/$name.pdf", "file://$dir/$name.html"],
+                    ['HOME' => $dir, 'PATH' => '/usr/bin:/bin']);
+            } catch (RuntimeException) {}
+            return is_file("$dir/$name.pdf") && filesize("$dir/$name.pdf") > 0;
+        };
+        $files = [];
+        foreach ($groups as $n => $group) {
+            if ($render(implode('', $group), "p$n")) { $files[] = "$dir/p$n.pdf"; continue; }
+            // out of memory: print this part piece by piece (one marked piece = at most 50 charts / 2 table blocks)
+            foreach ($group as $k => $piece) {
+                if (!$render($piece, "p{$n}_$k")) {
+                    throw new RuntimeException('The PDF could not be produced: one part of the report is too large to '
+                        . 'print (it ran out of memory). Please tell the monitoring admin which report and period you chose.');
+                }
+                $files[] = "$dir/p{$n}_$k.pdf";
+            }
+        }
+        if (count($files) === 1) return file_get_contents($files[0]);
+        run(array_merge(['pdfunite'], $files, ["$dir/out.pdf"]));
+        return file_get_contents("$dir/out.pdf");
     } finally {
         exec('rm -rf ' . escapeshellarg($dir));
     }
@@ -514,6 +611,7 @@ td.n, th.n { text-align: right; white-space: nowrap; }
     <div><p class="label">Generated</p><p class="value"><?= h(date('d M Y, H:i')) ?> IST by <?= h($_SESSION['user']) ?></p></div>
     <div><p class="label">Devices</p><p class="value"><?= h(implode(', ', $hosts)) ?></p></div>
     <div><p class="label">Contents</p><p class="value"><?= count($r['items']) ?> metrics: summary, charts<?= $r['table'] ? ', data table at ' . h(strtolower($stepTxt)) . ' steps' : '' ?></p></div>
+    <?php if (!empty($r['notes'])): ?><div style="grid-column: 1 / -1"><p class="label">Adjusted so the report could be produced</p><p class="value" style="font-size:10pt"><?= implode('<br>', array_map('h', $r['notes'])) ?></p></div><?php endif; ?>
   </div>
   <div class="foot">Source: Zabbix &middot; isp.picloud.in &middot; statistics are calculated over the <?= h(strtolower($stepTxt)) ?> step averages; 95th percentile = value exceeded in only 5% of steps</div>
 </div>
@@ -529,11 +627,11 @@ td.n, th.n { text-align: right; white-space: nowrap; }
 <?php endforeach; ?>
 </tbody></table>
 
-<div class="section">
+<?= PDF_PART ?><div class="section">
 <h2>Charts</h2>
 <div class="legend">Line: average per <?= h(strtolower($stepTxt)) ?><?php if (array_intersect(['min', 'max'], $r['aggs'])): ?><span class="sw" style="background:rgba(11,107,203,.16)"></span>shaded: minimum–maximum within each step<?php endif; ?>. Gaps mean no data was collected.</div>
 <?php foreach ($r['items'] as $i => $it): $row = $summary[$i]; $u = $it['unit'] !== '' ? ' ' . $it['unit'] : ''; ?>
-<div class="chart">
+<?= $i && $i % 50 === 0 ? PDF_PART : '' ?><div class="chart">
   <div class="t"><div><span class="name"><?= h($it['name']) ?></span> <span class="host">&middot; <?= h($it['host']) ?><?= $it['unit'] !== '' ? ' &middot; ' . h($it['unit']) : '' ?></span></div>
   <div class="st"><?php if (!$it['mapped'] && $row[3]): ?>min <b><?= h($row[4] . $u) ?></b> &nbsp; avg <b><?= h($row[5] . $u) ?></b> &nbsp; max <b><?= h($row[6] . $u) ?></b> &nbsp; 95th <b><?= h($row[7] . $u) ?></b><?php elseif ($it['mapped']): ?><?= h($row[9]) ?><?php endif; ?></div></div>
   <?= chartSvg($it, $data[$it['itemid']] ?? [], $r) ?>
@@ -560,7 +658,7 @@ td.n, th.n { text-align: right; white-space: nowrap; }
     }
     $blocks = array_chunk(array_keys($cols), PDF_COLS_PER_TABLE);
     foreach ($blocks as $bi => $block): ?>
-<div class="section">
+<?= $bi % 2 === 0 ? PDF_PART : '' ?><div class="section">
 <h2>Data table<?= count($blocks) > 1 ? ' (' . ($bi + 1) . ' of ' . count($blocks) . ')' : '' ?></h2>
 <p class="sub">One row per <?= h(strtolower($stepTxt)) ?> (<?= h(strtolower($aggTxt)) ?>) &middot; <?= $trimmed !== '' ? 'data from ' . h($trimmed) . ' IST' : 'no data in this period' ?> &middot; empty cell = no data in that step</p>
 <table class="data"><thead><tr><th>Time (IST)</th><?php foreach ($block as $c): ?><th class="n"><span class="host"><?= h($cols[$c]['host']) ?></span><?= h($cols[$c]['name']) ?></th><?php endforeach; ?></tr></thead><tbody>
@@ -579,6 +677,10 @@ td.n, th.n { text-align: right; white-space: nowrap; }
 // the frontend session key, exactly as the Zabbix server does for scheduled reports. One PDF page per dashboard page.
 
 function run(array $cmd, array $env = []): void {
+    if ($cmd[0] === CHROME) {   // never unbounded: a runaway render once left the server without RAM or swap (2026-10-13)
+        $cmd = array_merge(posix_geteuid() === 0 ? [] : ['sudo', '-n'], [PDF_CHROME, $env['HOME']], array_slice($cmd, 1));
+        $env = [];
+    }
     $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $env ?: null);
     $out = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
     if (proc_close($p) !== 0) throw new RuntimeException('PDF tool failed: ' . trim(substr($out, 0, 300)));
@@ -920,16 +1022,18 @@ svg { width: 100%; height: auto; display: block; }
         . ' · lines show the average of each step; gaps mean no data</p>';
     if ($ports) {
         $html .= '<h3>Interfaces (' . count($ports) . ')</h3><div class="grid">';
-        foreach ($ports as $p) $html .= portPanel($p, $data, $r);
+        foreach (array_values($ports) as $k => $p) $html .= ($k && $k % 20 === 0 ? '</div>' . PDF_PART . '<div class="grid">' : '') . portPanel($p, $data, $r);   // printable in parts
         $html .= '</div>';
     }
     if ($others) {
-        $html .= '<h3>Items (' . count($others) . ')</h3><div class="grid3">';
-        foreach ($others as $it) $html .= itemPanel($it, $data[$it['itemid']] ?? [], $r);
+        $html .= PDF_PART . '<h3>Items (' . count($others) . ')</h3><div class="grid3">';
+        foreach (array_values($others) as $k => $it) $html .= ($k && $k % 40 === 0 ? '</div>' . PDF_PART . '<div class="grid3">' : '') . itemPanel($it, $data[$it['itemid']] ?? [], $r);
         $html .= '</div>';
     }
     return htmlToPdf($html . '</body></html>');
 }
+
+require __DIR__ . '/device_report.php';   // "Device report" tab: everything a device collects
 
 // ---- Routing ------------------------------------------------------------------------------------------
 if (defined('REPORTS_LIB')) return;
@@ -978,7 +1082,7 @@ try {
             $from = parseTime((string)($_POST['from'] ?? ''));
             $to = min(parseTime((string)($_POST['to'] ?? '')), time());
             if ($from >= $to) throw new InvalidArgumentException('"From" must be before "To".');
-            if ($to - $from > 366 * 86400) throw new InvalidArgumentException('Maximum range is one year.');
+            if ($to - $from > 366 * 86400) $from = $to - 366 * 86400;   // longest dashboard period: one year
             $dash = api('dashboard.get', ['dashboardids' => [(int)($_POST['dashboardid'] ?? 0)], 'output' => ['dashboardid', 'name'],
                 'selectPages' => 'extend'])[0] ?? null;
             if (!$dash) throw new InvalidArgumentException('Choose a dashboard.');
@@ -1000,16 +1104,38 @@ try {
             $error = $e->getMessage();
         }
     }
+    if ($loggedIn && ($_POST['action'] ?? '') === 'device') {
+        try {
+            if (!hash_equals($_SESSION['csrf'], (string)($_POST['csrf'] ?? ''))) throw new RuntimeException('Session expired, please reload the page.');
+            $from = parseTime((string)($_POST['from'] ?? ''));
+            $to = min(parseTime((string)($_POST['to'] ?? '')), time());
+            if ($from >= $to) throw new InvalidArgumentException('"From" must be before "To".');
+            if ($to - $from > MAX_DAYS * 86400) $from = $to - MAX_DAYS * 86400;   // history is kept MAX_DAYS
+            $hostids = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['devices'] ?? [])))));
+            if (!$hostids) throw new InvalidArgumentException('Select at least one device.');
+            $format = ($_POST['format'] ?? 'pdf') === 'csv' ? 'csv' : 'pdf';
+            $ports = ($_POST['ports'] ?? 'all') === 'active' ? 'active' : 'all';
+            session_write_close();
+            set_time_limit(1800);
+            $out = deviceReport(db(), $hostids, $from, $to, $format, $ports);
+            $fname = 'device-report-' . (count($hostids) === 1 ? preg_replace('/[^A-Za-z0-9]+/', '-', api('host.get', ['hostids' => $hostids, 'output' => ['name']])[0]['name'] ?? 'device') : count($hostids) . '-devices')
+                . '-' . date('Ymd-Hi', $from) . '-to-' . date('Ymd-Hi', $to) . '.' . $format;
+            header('Content-Type: ' . ($format === 'csv' ? 'text/csv; charset=utf-8' : 'application/pdf'));
+            header("Content-Disposition: attachment; filename=\"$fname\"");
+            header('Content-Length: ' . strlen($out));
+            header('Cache-Control: no-store');
+            echo $out;
+            exit;
+        } catch (InvalidArgumentException | RuntimeException $e) {
+            if ($e instanceof AuthExpired) throw $e;
+            $error = $e->getMessage();
+        }
+    }
     if ($loggedIn && ($_POST['action'] ?? '') === 'export') {
         try {
             if (!hash_equals($_SESSION['csrf'], (string)($_POST['csrf'] ?? ''))) throw new RuntimeException('Session expired, please reload the page.');
             $r = readRequest();
             set_time_limit(1800);   // up to MAX_ITEMS items: a few thousand 5-10 s items over a day take several minutes
-            $cells = estimateCells($r);
-            if ($cells > MAX_CELLS) {
-                throw new InvalidArgumentException(sprintf('That report would have about %s values (limit %s). Choose a larger step, a shorter range or fewer items.',
-                    number_format($cells), number_format(MAX_CELLS)));
-            }
             $db = db();
             if (($_POST['mode'] ?? '') === 'download') {
                 session_write_close();
@@ -1063,7 +1189,7 @@ try {
 
 $post = fn(string $k, string $d = '') => h((string)($_POST[$k] ?? $d));
 $now = time();
-$tab = $_GET['tab'] ?? (($_POST['action'] ?? '') === 'export' ? 'csv' : 'pdf');
+$tab = $_GET['tab'] ?? ['export' => 'csv', 'device' => 'device'][$_POST['action'] ?? ''] ?? 'pdf';
 ?>
 <!doctype html>
 <html lang="en">
@@ -1137,8 +1263,73 @@ td:first-child, th:first-child { text-align:left; }
     <button class="primary" type="submit">Log in</button>
   </form>
 <?php else: ?>
-<nav class="tabs"><a href="?tab=pdf" class="<?= $tab === 'pdf' ? 'on' : '' ?>">Dashboard PDF</a><a href="?tab=csv" class="<?= $tab === 'csv' ? 'on' : '' ?>">Data report (PDF / CSV)</a></nav>
-<?php if ($tab === 'pdf'): ?>
+<nav class="tabs"><a href="?tab=pdf" class="<?= $tab === 'pdf' ? 'on' : '' ?>">Dashboard PDF</a><a href="?tab=device" class="<?= $tab === 'device' ? 'on' : '' ?>">Device report</a><a href="?tab=csv" class="<?= $tab === 'csv' ? 'on' : '' ?>">Data report (PDF / CSV)</a></nav>
+<?php if ($tab === 'device'): $picked = array_map('strval', (array)($_POST['devices'] ?? [])); ?>
+<form method="post" id="df" class="card">
+  <h2>Device report – everything a device collects</h2>
+  <input type="hidden" name="action" value="device">
+  <input type="hidden" name="csrf" value="<?= h($_SESSION['csrf']) ?>">
+  <p class="hint" style="margin-top:0">Per device: what needs attention now (tunnels, ports, fans, PSUs, sensors … that are down or failed), the problems of the period,
+    key charts, then <b>every monitored item</b> grouped by section. Each IPsec tunnel / selector, SSL VPN user, port, sensor, VDOM or HA member is one row with
+    its current state (up / down), the share of the period it spent in each state, and its traffic or values (last · average · maximum).</p>
+  <div class="row"><span class="hint">Select a whole group:</span>
+    <?php foreach ($groups as $g): if (!$g['hosts']) continue; ?><button type="button" class="chip grpbtn" data-ids="<?= h(implode(',', array_column($g['hosts'], 'hostid'))) ?>"><?= h($g['name']) ?></button><?php endforeach; ?>
+    <button type="button" class="chip" id="devnone">Clear</button></div>
+  <div class="list" style="max-height:300px">
+    <?php foreach ($groups as $g): if (!$g['hosts']) continue; ?>
+      <div class="grp"><?= h($g['name']) ?></div>
+      <?php usort($g['hosts'], fn($a, $b) => strcmp($a['name'], $b['name'])); foreach ($g['hosts'] as $hst): ?>
+        <label><input type="checkbox" class="dev" name="devices[]" value="<?= h($hst['hostid']) ?>" <?= in_array($hst['hostid'], $picked, true) ? 'checked' : '' ?>> <?= h($hst['name']) ?></label>
+      <?php endforeach; ?>
+    <?php endforeach; ?>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <label>From <input type="datetime-local" name="from" id="from" required value="<?= $post('from', date('Y-m-d\TH:i', $now - 86400)) ?>"></label>
+    <label>To <input type="datetime-local" name="to" id="to" required value="<?= $post('to', date('Y-m-d\TH:i', $now)) ?>"></label>
+    <span class="hint">IST</span>
+  </div>
+  <div class="row" id="ranges"></div>
+  <div class="row">
+    <label>Interfaces <select name="ports">
+      <?php $pp = $_POST['ports'] ?? 'all'; foreach (['all' => 'All ports', 'active' => 'Ports that were up or carried traffic'] as $k => $v): ?><option value="<?= $k ?>" <?= $pp === $k ? 'selected' : '' ?>><?= h($v) ?></option><?php endforeach; ?>
+    </select></label>
+    <label>Output <select name="format">
+      <?php $ff = $_POST['format'] ?? 'pdf'; foreach (['pdf' => 'PDF report', 'csv' => 'CSV for Excel (one row per value)'] as $k => $v): ?><option value="<?= $k ?>" <?= $ff === $k ? 'selected' : '' ?>><?= h($v) ?></option><?php endforeach; ?>
+    </select></label>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button type="submit" class="primary">Download report</button>
+    <span class="hint" id="busy">Building the report – a few seconds per device, up to a minute for large switches…</span>
+  </div>
+</form>
+<script>
+(() => {
+  const RANGES = [['Last 1 hour', 3600], ['Last 6 hours', 21600], ['Last 24 hours', 86400], ['Today', 'today'], ['Yesterday', 'yesterday'],
+                  ['Last 7 days', 604800], ['Last 30 days', 2592000], ['Last 90 days', 7776000], ['Last 180 days', 15552000]];
+  const pad = n => String(n).padStart(2, '0');
+  const local = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const box = document.getElementById('ranges');
+  for (const [label, v] of RANGES) {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = label;
+    b.onclick = () => {
+      const now = new Date(); let a, z = now;
+      if (v === 'today') { a = new Date(now); a.setHours(0, 0, 0, 0); }
+      else if (v === 'yesterday') { z = new Date(now); z.setHours(0, 0, 0, 0); a = new Date(z - 86400000); }
+      else a = new Date(now - v * 1000);
+      document.getElementById('from').value = local(a); document.getElementById('to').value = local(z);
+    };
+    box.appendChild(b);
+  }
+  const boxes = () => [...document.querySelectorAll('input.dev')];
+  document.querySelectorAll('.grpbtn').forEach(b => b.onclick = () => {
+    const ids = new Set(b.dataset.ids.split(',')); boxes().forEach(x => { if (ids.has(x.value)) x.checked = true; });
+  });
+  document.getElementById('devnone').onclick = () => boxes().forEach(x => x.checked = false);
+  document.getElementById('df').addEventListener('submit', () => { document.getElementById('busy').style.display = 'inline';
+    setTimeout(() => document.getElementById('busy').style.display = 'none', 120000); });
+})();
+</script>
+<?php elseif ($tab === 'pdf'): ?>
 <form method="post" id="pf" class="card">
   <h2>Dashboard report (PDF)</h2>
   <input type="hidden" name="action" value="pdf">
@@ -1261,6 +1452,7 @@ const PICKED = new Set(<?= json_encode(array_map('strval', (array)($_POST['pages
   <div class="card" id="preview">
     <h2>Preview</h2>
     <p><?= h(describe($preview['r'])) ?> — <?= number_format($preview['total']) ?> rows<?= $preview['total'] > count($preview['rows']) ? ', first ' . count($preview['rows']) . ' shown' : '' ?>.</p>
+    <?php foreach ($preview['r']['notes'] ?? [] as $note): ?><p class="hint">Adjusted: <?= h($note) ?></p><?php endforeach; ?>
     <div class="tablewrap"><table>
       <thead><tr><?php foreach ($preview['hdr'] as $c): ?><th><?= h((string)$c) ?></th><?php endforeach; ?></tr></thead>
       <tbody><?php foreach ($preview['rows'] as $row): ?><tr><?php foreach ($row as $c): ?><td><?= h((string)$c) ?></td><?php endforeach; ?></tr><?php endforeach; ?></tbody>

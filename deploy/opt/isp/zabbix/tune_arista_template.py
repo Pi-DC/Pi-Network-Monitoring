@@ -32,6 +32,9 @@ def tune(z, template=TEMPLATE):
     rule = z.call("discoveryrule.get", {"templateids": tid, "filter": {"name": ["Network interfaces discovery"]},
                                         "output": ["itemid"]})[0]["itemid"]
     have = {p["key_"] for p in z.call("itemprototype.get", {"discoveryids": rule, "output": ["key_"]})}
+    # the template's own oper status key (Nexus: net.if.status[{#SNMPINDEX}], no ifOperStatus. prefix)
+    oper = OPER_KEY if OPER_KEY in have else next((k for k in have if k.startswith("net.if.status[")), OPER_KEY)
+    params = f"last(//{oper})+(last(//{ADMIN_KEY})=2)*(8-last(//{oper}))"
     created = []
     if ADMIN_KEY not in have:
         z.call("itemprototype.create", {
@@ -45,10 +48,16 @@ def tune(z, template=TEMPLATE):
             "hostid": tid, "ruleid": rule, "type": 15, "key_": STATE_KEY, "value_type": 3, "delay": "30s",
             "name": "Interface {#IFNAME}({#IFALIAS}): Port state",
             # oper status, or 8 when administratively shut down (comparison yields 1/0)
-            "params": f"last(//{OPER_KEY})+(last(//{ADMIN_KEY})=2)*(8-last(//{OPER_KEY}))",
+            "params": params,
             "valuemapid": vmaps["Port state"], "history": "90d", "trends": "0", "tags": TAGS,
             "description": "Operational status, except 8 = shutdown (ifAdminStatus down)."})
         created.append("Port state")
+    else:
+        state = z.call("itemprototype.get", {"discoveryids": rule, "filter": {"key_": STATE_KEY},
+                                             "output": ["itemid", "params"]})[0]
+        if state["params"] != params:
+            z.call("itemprototype.update", {"itemid": state["itemid"], "params": params})
+            created.append("Port state formula fixed")
     print(f"{template}: added {created or 'nothing new'}")
 
 

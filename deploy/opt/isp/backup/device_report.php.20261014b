@@ -1,0 +1,497 @@
+<?php
+// Device report (/reports tab "Device report"): EVERYTHING one or more devices collect, as a PDF (or CSV for Excel).
+// Included by index.php after its helper functions. Every monitored item of the device is reported, grouped by its
+// "component" tag (vpn, sslvpn, ha, network, fan, power ...). Inside a section, items named "<entity>: <metric>"
+// that exist for several entities (each IPsec tunnel, SSL VPN user, port, sensor, VDOM, HA member ...) become one
+// table with a row per entity and a column per metric; the rest is listed one item per row.
+//   State items (with a value map): current state + share of the period in each state, time-weighted
+//   (a state lasts until the next stored value, so "discard unchanged" items are measured correctly).
+//   Numbers: last / min / avg / max over the period (history up to DR_TRENDS_AFTER, hourly trends beyond).
+//   Text: last value in the period.
+// Rows in a bad state (down, failed, alarm ...) are listed first, and the device's first page lists everything that
+// is bad right now ("Needs attention"), so a down tunnel cannot hide among hundreds of rows.
+declare(strict_types=1);
+
+const DR_TRENDS_AFTER = 6 * 3600;      // longer periods: min / avg / max from the hourly trends
+const DR_SKIP_COMPONENTS = ['raw'];    // SNMP walk masters (JSON blobs feeding other items), not readable values
+const DR_SECTION_ORDER = ['system', 'os', 'inventory', 'health', 'cpu', 'memory', 'temperature', 'sensor', 'fan', 'power',
+    'storage', 'ha', 'stack', 'vpn', 'sslvpn', 'sd-wan', 'vdom', 'firewall', 'sessions', 'policy', 'security', 'ips',
+    'fortiguard', 'ssl', 'logging', 'bgp', 'routing', 'ip', 'lacp', 'stp', 'neighbours', 'optics', 'poe', 'config',
+    'ntp', 'network', 'interface'];
+const DR_SECTION_TITLE = ['system' => 'System', 'os' => 'Operating system', 'health' => 'Health', 'cpu' => 'CPU',
+    'memory' => 'Memory', 'temperature' => 'Temperatures', 'sensor' => 'Sensors', 'fan' => 'Fans', 'power' => 'Power supplies',
+    'storage' => 'Storage', 'ha' => 'High availability', 'stack' => 'Stack', 'vpn' => 'VPN (IPsec)', 'sslvpn' => 'SSL VPN',
+    'sd-wan' => 'SD-WAN', 'vdom' => 'VDOMs', 'firewall' => 'Firewall', 'sessions' => 'Sessions', 'policy' => 'Policies',
+    'security' => 'Security services', 'ips' => 'IPS', 'fortiguard' => 'FortiGuard', 'ssl' => 'SSL', 'logging' => 'Logging',
+    'bgp' => 'BGP', 'routing' => 'Routing', 'ip' => 'IP', 'lacp' => 'LACP', 'stp' => 'Spanning tree',
+    'neighbours' => 'Neighbours (LLDP / CDP)', 'optics' => 'Optics', 'poe' => 'PoE', 'config' => 'Configuration',
+    'ntp' => 'NTP', 'network' => 'Interfaces', 'interface' => 'Interfaces', '' => 'Other'];
+// current-state classification for colours, ordering and "Needs attention"
+const DR_BAD = '/\b(down|fail\w*|critical|alarm\w*|error|not ?ok|not ?present|absent|lower ?layer ?down|notpresent|faulty|'
+    . 'warning|degraded|unreachable|unavailable|active ?alarm|expired|out ?of ?sync|unsynchroni[sz]ed|'
+    . 'no ?light|not ?bundled|not ?established|not ?functioning)\b/i';   // shutdown / disabled / off: deliberate, neutral
+const DR_GOOD = '/\b(up|ok|normal|connected|established|bundled|ready|enabled|active|in ?sync|synchroni[sz]ed|good|'
+    . 'present|on|running|online|master|primary|healthy|valid|alive|forwarding|selected)\b/i';
+
+function drState(string $label): int {   // -1 bad, 1 good, 0 neutral
+    if (preg_match(DR_BAD, $label)) return -1;
+    return preg_match(DR_GOOD, $label) ? 1 : 0;
+}
+
+function drNum(?float $v, string $units): string {
+    if ($v === null) return '';
+    $u = ltrim($units, '!');
+    if ($u === 'uptime' || ($u === 's' && $v >= 86400)) {
+        $d = intdiv((int)$v, 86400);
+        return ($d ? "$d d " : '') . gmdate('H:i', (int)$v % 86400);
+    }
+    if ($u === 'unixtime') return $v > 0 ? date('d M Y H:i', (int)$v) : '';
+    if ($u === 's') return $v < 1 ? fmt($v * 1000) . ' ms' : fmt($v) . ' s';
+    $si = ['bps' => 1000, 'Bps' => 1000, 'B' => 1024, 'pps' => 1000];
+    if (isset($si[$u]) && abs($v) >= $si[$u]) {
+        $p = ['', 'K', 'M', 'G', 'T', 'P'];
+        $i = min(5, (int)floor(log(abs($v), $si[$u])));
+        $s = $v / $si[$u] ** $i;
+        return number_format($s, abs($s) >= 100 ? 0 : (abs($s) >= 10 ? 1 : 2)) . ' ' . $p[$i] . $u;
+    }
+    if ($u === '%') return number_format($v, 1) . ' %';
+    $s = floor($v) == $v ? (string)(int)$v : number_format($v, abs($v) >= 100 ? 1 : 2, '.', '');
+    return $u !== '' ? "$s $u" : $s;
+}
+
+function drMap(array $it, $v): string {   // value-mapped label without the "(n)"
+    if ($v === null) return '';
+    return preg_replace('/ \(-?\d+\)$/', '', label($it, $v));
+}
+
+// Last value per item matching $cond (e.g. "clock <= 123"), in two index-only steps: the newest clock per item, then
+// those exact rows by primary key. (A JOIN on a derived table made MariaDB scan history_uint for minutes, 2026-10-14.)
+function drLastBefore(mysqli $db, string $table, array $ids, string $cond): array {
+    $out = [];
+    $last = [];
+    foreach (array_chunk($ids, 200) as $part) {   // one index dive per item (GROUP BY reads the whole index range)
+        $res = $db->query(implode(' UNION ALL ', array_map(fn($id) =>
+            "SELECT $id, (SELECT MAX(clock) FROM $table WHERE itemid = $id AND $cond)", $part)));
+        while ($row = $res->fetch_row()) if ($row[1] !== null) $last[(int)$row[0]] = (int)$row[1];
+        $res->free();
+    }
+    foreach (array_chunk($last, 500, true) as $part) {
+        $where = implode(' OR ', array_map(fn($id, $c) => "(itemid = $id AND clock = $c)", array_keys($part), $part));
+        $res = $db->query("SELECT itemid, value, clock FROM $table WHERE $where ORDER BY ns");
+        while ($row = $res->fetch_row()) $out[(int)$row[0]] = [$row[1], (int)$row[2]];
+        $res->free();
+    }
+    return $out;
+}
+
+// All monitored items of one host with their period statistics.
+function drItems(mysqli $db, array $host, int $from, int $to): array {
+    $items = api('item.get', ['hostids' => [$host['hostid']], 'output' => ['itemid', 'name', 'key_', 'value_type', 'units',
+        'lastvalue', 'lastclock', 'state', 'error', 'history', 'description'], 'selectValueMap' => ['mappings'],
+        'selectTags' => ['tag', 'value'], 'filter' => ['status' => 0, 'flags' => [0, 4]], 'webitems' => true]);
+    $out = [];
+    foreach ($items as $it) {
+        $comp = '';
+        foreach ($it['tags'] as $t) if ($t['tag'] === 'component') { $comp = $t['value']; break; }
+        if (in_array($comp, DR_SKIP_COMPONENTS, true) || in_array($it['history'], ['0', '0s', '0d'], true)) continue;
+        $it['component'] = $comp;
+        $it['mapped'] = !empty($it['valuemap']['mappings']) && in_array($it['value_type'], ['0', '3'], true);
+        $it['numeric'] = in_array($it['value_type'], ['0', '3'], true);
+        $it['stats'] = null;
+        $out[$it['itemid']] = $it;
+    }
+    $byTable = fn(array $its, callable $pick) => array_reduce($its, function ($acc, $it) use ($pick) {
+        $t = $pick($it);
+        if ($t !== null) $acc[$t][] = (int)$it['itemid'];   // value type '0' (float) is falsy
+        return $acc;
+    }, []);
+    $hist = fn($vt) => ['0' => 'history', '1' => 'history_str', '2' => 'history_log', '3' => 'history_uint', '4' => 'history_text'][$vt];
+
+    // last value at or before the end of the period (index-only MAX per item, then one lookup)
+    foreach ($byTable($out, fn($it) => $hist($it['value_type'])) as $table => $ids) {
+        foreach (array_chunk($ids, 2000) as $chunk) {
+            $in = implode(',', $chunk);
+            foreach (drLastBefore($db, $table, $chunk, "clock <= $to") as $id => [$v, $c]) {
+                $out[$id]['last'] = $v;
+                $out[$id]['lastc'] = $c;
+            }
+        }
+    }
+    // numbers: min / avg / max
+    $trends = $to - $from > DR_TRENDS_AFTER;
+    foreach ($byTable($out, fn($it) => $it['numeric'] && !$it['mapped'] ? $it['value_type'] : null) as $vt => $ids) {
+        $table = $trends ? ((string)$vt === '0' ? 'trends' : 'trends_uint') : $hist((string)$vt);
+        $cols = $trends ? 'MIN(value_min), SUM(value_avg * num) / SUM(num), MAX(value_max), SUM(num)'
+            : 'MIN(value), AVG(value), MAX(value), COUNT(*)';
+        $lo = $trends ? intdiv($from, 3600) * 3600 : $from;
+        foreach (array_chunk($ids, 2000) as $chunk) {
+            $res = $db->query("SELECT itemid, $cols FROM $table WHERE itemid IN (" . implode(',', $chunk) . ")
+                AND clock >= $lo AND clock < $to GROUP BY itemid");
+            while ($row = $res->fetch_row()) {
+                $out[$row[0]]['stats'] = ['min' => (float)$row[1], 'avg' => (float)$row[2], 'max' => (float)$row[3], 'n' => (int)$row[4]];
+            }
+            $res->free();
+        }
+    }
+    // states: time in each state; the state at the start of the period is the last value before it
+    $mapped = array_keys(array_filter($out, fn($it) => $it['mapped']));
+    foreach (['history', 'history_uint'] as $table) {
+        $ids = array_values(array_filter($mapped, fn($id) => $hist($out[$id]['value_type']) === $table));
+        foreach (array_chunk($ids, 1000) as $chunk) {
+            $in = implode(',', $chunk);
+            $prev = [];
+            foreach (drLastBefore($db, $table, $chunk, "clock < $from") as $id => [$v]) $prev[$id] = $v;
+            $acc = [];
+            $res = $db->query("SELECT itemid, clock, value FROM $table WHERE itemid IN ($in) AND clock >= $from AND clock < $to
+                ORDER BY itemid, clock", MYSQLI_USE_RESULT);
+            $cur = null; $t0 = $from; $v0 = null; $changes = 0;
+            $flush = function ($id, $tEnd) use (&$acc, &$t0, &$v0, &$changes) {
+                if ($v0 !== null && $tEnd > $t0) $acc[$id]['dur'][(string)(int)round((float)$v0)] = ($acc[$id]['dur'][(string)(int)round((float)$v0)] ?? 0) + $tEnd - $t0;
+                $acc[$id]['changes'] = $changes;
+            };
+            while ($row = $res->fetch_row()) {
+                [$id, $c, $v] = [(int)$row[0], (int)$row[1], $row[2]];
+                if ($id !== $cur) {
+                    if ($cur !== null) $flush($cur, $to);
+                    $cur = $id; $t0 = $from; $v0 = $prev[$id] ?? null; $changes = 0;
+                }
+                if ($v0 !== null && (string)$v0 !== (string)$v) $changes++;
+                $flush($id, $c);
+                $t0 = $c; $v0 = $v;
+            }
+            if ($cur !== null) $flush($cur, $to);
+            $res->free();
+            foreach ($chunk as $id) {   // no value inside the period: the state before it lasted all period
+                if (!isset($acc[$id]) && isset($prev[$id])) $acc[$id] = ['dur' => [(string)(int)round((float)$prev[$id]) => $to - $from], 'changes' => 0];
+                if (isset($acc[$id])) $out[$id]['states'] = $acc[$id];
+            }
+        }
+    }
+    return $out;
+}
+
+// One table cell for an item: [text, css class, sort badness]
+function drCell(array $it): array {
+    if (!isset($it['last']) && !$it['stats'] && empty($it['states'])) {
+        return [$it['state'] === '1' ? 'not supported' : 'no data', 'mute', 0];
+    }
+    if ($it['mapped']) {
+        $now = isset($it['last']) ? drMap($it, $it['last']) : '';
+        $cls = ['bad', 'mute', 'good'][drState($now) + 1];
+        $txt = $now;
+        $dur = $it['states']['dur'] ?? [];
+        $total = array_sum($dur);
+        if (count($dur) > 1 && $total) {
+            arsort($dur);
+            $parts = [];
+            foreach (array_slice($dur, 0, 3, true) as $v => $s) $parts[] = drMap($it, $v) . ' ' . fmt(round(100 * $s / $total, 1)) . '%';
+            $txt .= ' · ' . implode(', ', $parts);
+            if (($it['states']['changes'] ?? 0) > 0) $txt .= ' · ' . $it['states']['changes'] . ' change' . ($it['states']['changes'] > 1 ? 's' : '');
+        }
+        return [$txt, $cls, drState($now) < 0 ? 2 : (count($dur) > 1 ? 1 : 0)];
+    }
+    if (!$it['numeric']) {
+        $v = trim(preg_replace('/\s+/', ' ', (string)($it['last'] ?? '')));
+        return [mb_strlen($v) > 160 ? mb_substr($v, 0, 157) . '…' : $v, 'txt', 0];
+    }
+    $last = isset($it['last']) ? drNum((float)$it['last'], $it['units']) : '';
+    $s = $it['stats'];
+    if (!$s || $s['min'] == $s['max']) return [$last, 'n', 0];
+    return [$last . ' · avg ' . drNum($s['avg'], $it['units']) . ' · max ' . drNum($s['max'], $it['units']), 'n', 0];
+}
+
+// Group a section's items into entity tables + a list of single items.
+function drTables(array $items): array {
+    $ent = [];
+    $singles = [];
+    foreach ($items as $it) {
+        $p = strrpos($it['name'], ': ');
+        if ($p === false) { $ent['']['_'][$it['name']] = $it; continue; }
+        $e = substr($it['name'], 0, $p);
+        $words = preg_split('/\s+/', $e);
+        if (count($words) < 2) { $singles[$it['name']] = $it; continue; }   // "IPsec: tunnels down": a total, not an entity
+        $kind = $words[0] . (count($words) > 2 && preg_match('/^[a-z][a-z-]+$/', $words[1]) ? ' ' . $words[1] : '');
+        $ent[$kind][$e][substr($it['name'], $p + 2)] = $it;
+    }
+    $tables = [];
+    $singles += $ent['']['_'] ?? [];
+    unset($ent['']);
+    foreach ($ent as $kind => $rows) {
+        if (count($rows) < 2) {   // one entity: its values go to the list
+            foreach ($rows as $e => $ms) foreach ($ms as $m => $it) $singles["$e: $m"] = $it;
+            continue;
+        }
+        $cols = [];
+        foreach ($rows as $ms) foreach ($ms as $m => $it) $cols[$m] = ($cols[$m] ?? 0) + 1;
+        foreach ($cols as $m => $n) {   // a column only one or two rows have (e.g. dial-up counters among 300 selectors)
+            if (count($rows) >= 6 && $n <= max(2, count($rows) / 20)) {
+                foreach ($rows as $e => $ms) if (isset($ms[$m])) { $singles["$e: $m"] = $ms[$m]; unset($rows[$e][$m]); }
+                unset($cols[$m]);
+            }
+        }
+        $rows = array_filter($rows);
+        if (count($rows) < 2) { foreach ($rows as $e => $ms) foreach ($ms as $m => $it) $singles["$e: $m"] = $it; continue; }
+        arsort($cols);
+        // state columns first, then the rest by how many rows have them
+        $first = array_keys(array_filter($cols, fn($n, $m) => array_filter($rows, fn($ms) => isset($ms[$m]) && $ms[$m]['mapped']) !== [], ARRAY_FILTER_USE_BOTH));
+        $cols = array_values(array_unique(array_merge($first, array_keys($cols))));
+        $tables[] = ['kind' => $kind, 'cols' => $cols, 'rows' => $rows];
+    }
+    ksort($singles, SORT_NATURAL | SORT_FLAG_CASE);
+    return [$tables, $singles];
+}
+
+function drNatural(string $a, string $b): int { return strnatcasecmp($a, $b); }
+
+// Problems on the host during the period (and still open ones).
+function drProblems(array $host, int $from, int $to): array {
+    $ev = api('event.get', ['hostids' => [$host['hostid']], 'source' => 0, 'object' => 0, 'value' => 1,
+        'time_from' => $from - 30 * 86400, 'time_till' => $to, 'output' => ['eventid', 'clock', 'name', 'severity', 'r_eventid'],
+        'sortfield' => ['clock'], 'sortorder' => 'DESC', 'limit' => 5000]);
+    $rids = array_values(array_filter(array_column($ev, 'r_eventid'), fn($x) => $x !== '0'));
+    $rclock = $rids ? array_column(api('event.get', ['eventids' => $rids, 'output' => ['eventid', 'clock']]), 'clock', 'eventid') : [];
+    $out = [];
+    foreach ($ev as $e) {
+        $end = $e['r_eventid'] !== '0' ? (int)($rclock[$e['r_eventid']] ?? 0) : 0;
+        if ((int)$e['clock'] < $from && $end && $end < $from) continue;   // over before the period
+        $out[] = ['start' => (int)$e['clock'], 'end' => $end, 'name' => $e['name'], 'sev' => (int)$e['severity']];
+    }
+    return $out;
+}
+
+// identity facts on the device page, in this order (first matching item each)
+const DR_IDENT = ['/(^|: )(hardware )?model( name)?$/i', '/serial number$/i', '/(firmware|software|os) version$|^firmware version/i',
+    '/^(system|device) (name|description)$|^system description/i', '/location$/i', '/^Uptime \(network\)$|^uptime$/i', '/^HA mode$/i'];
+const DR_IDENT_SKIP = '/FortiGuard|definition|database|engine|^HA \d|primary unit|^Interface |^SFP|^Optics|^Sensor|^Entity/i';
+const DR_SEV = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
+const DR_CHARTS = ['ICMP response time', 'ICMP loss', 'Health: CPU utilization', 'Health: Memory utilization',
+    'Health: Highest temperature', 'Ports total: bits received', 'Ports total: bits sent', 'Firewall: Active sessions',
+    'IPsec: tunnels up', 'IPsec: tunnels down', 'IPsec: traffic in (all tunnels)', 'IPsec: traffic out (all tunnels)',
+    'SSL VPN: connected users', 'Firewall: VPN tunnels up', 'Firewall: VPN tunnels up (IPsec SAs)',
+    'Firewall: VPN traffic encrypted (sent into tunnels)', 'Firewall: VPN traffic decrypted (received from tunnels)'];
+
+function drChartStep(int $span): string {
+    foreach (array_keys(STEPS) as $s) if ($s !== 'raw' && $span / (int)$s <= 600) return (string)$s;
+    return '86400';
+}
+
+// One device: [html, csv rows]
+function drDevice(mysqli $db, array $host, int $from, int $to, string $ports): array {
+    $items = drItems($db, $host, $from, $to);
+    $problems = drProblems($host, $from, $to);
+    $sections = [];
+    foreach ($items as $it) {
+        $c = $it['component'];
+        if (in_array($c, ['network', 'interface'], true) && str_starts_with($it['name'], 'Interface ')) $c = 'network';
+        $sections[$c][] = $it;
+    }
+    uksort($sections, function ($a, $b) {
+        $ia = array_search($a, DR_SECTION_ORDER, true); $ib = array_search($b, DR_SECTION_ORDER, true);
+        return [$ia === false ? 999 : $ia, $a] <=> [$ib === false ? 999 : $ib, $b];
+    });
+    $csv = [];
+    $attention = [];
+    $body = '';
+    $name = $host['name'];
+    foreach ($sections as $comp => $its) {
+        [$tables, $singles] = drTables($its);
+        $title = DR_SECTION_TITLE[$comp] ?? ucfirst($comp);
+        $html = '';
+        foreach ($tables as $t) {
+            $rows = $t['rows'];
+            if ($comp === 'network' && $ports === 'active') {   // ports that were up or carried traffic
+                $rows = array_filter($rows, function ($ms) {
+                    foreach ($ms as $m => $it) {
+                        if ($it['mapped'] && drState(drMap($it, $it['last'] ?? null)) > 0) return true;
+                        if (in_array($m, ['Bits received', 'Bits sent'], true) && ($it['stats']['max'] ?? 0) > 0) return true;
+                    }
+                    return false;
+                });
+            }
+            $cells = [];
+            $summary = [];
+            $order = [];
+            foreach ($rows as $e => $ms) {
+                $bad = 0;
+                foreach ($t['cols'] as $m) {
+                    if (!isset($ms[$m])) { $cells[$e][$m] = ['', 'mute', 0]; continue; }
+                    $cells[$e][$m] = $c = drCell($ms[$m]);
+                    $bad = max($bad, $c[2]);
+                    if ($ms[$m]['mapped'] && isset($ms[$m]['last'])) {
+                        $now = drMap($ms[$m], $ms[$m]['last']);
+                        $summary[$m][$now] = ($summary[$m][$now] ?? 0) + 1;
+                        $wasGood = array_filter(array_keys($ms[$m]['states']['dur'] ?? []), fn($v) => drState(drMap($ms[$m], $v)) > 0);
+                        if (drState($now) < 0 && ($comp !== 'network' || $wasGood)) {
+                            $attention[] = [$title, "$e: $m", $c[0]];
+                        }
+                    }
+                    $csv[] = [$name, $title, $t['kind'], $e, $m, $c[0]];
+                }
+                $order[$e] = $bad;
+            }
+            $keys = array_keys($rows);
+            usort($keys, fn($a, $b) => [-($order[$a] ?? 0), 0] <=> [-($order[$b] ?? 0), strnatcasecmp($a, $b)]);
+            $sum = [];
+            foreach ($summary as $m => $counts) {
+                arsort($counts);
+                $sum[] = '<b>' . h($m) . ':</b> ' . implode(', ', array_map(fn($k, $n) => '<span class="' . ['bad', 'mute', 'good'][drState((string)$k) + 1] . '">' . $n . ' ' . h((string)$k) . '</span>', array_keys($counts), $counts));
+            }
+            $prefix = strlen($t['kind']) + 1;
+            $html .= '<h3>' . h($t['kind']) . ' <span class="cnt">' . count($rows) . ' of ' . count($t['rows']) . '</span></h3>'
+                . ($sum ? '<p class="sum">' . implode(' &nbsp;·&nbsp; ', $sum) . '</p>' : '')
+                . '<table class="ent"><thead><tr><th>' . h($t['kind']) . '</th>'
+                . implode('', array_map(fn($m) => '<th>' . h($m) . '</th>', $t['cols'])) . '</tr></thead><tbody>';
+            foreach ($keys as $e) {
+                $html .= '<tr><td class="e">' . h(substr($e, $prefix) ?: $e) . '</td>';
+                foreach ($t['cols'] as $m) { [$txt, $cls] = $cells[$e][$m]; $html .= '<td class="' . $cls . '">' . h($txt) . '</td>'; }
+                $html .= '</tr>';
+            }
+            $html .= '</tbody></table>';
+        }
+        if ($singles) {
+            $html .= '<table class="list"><thead><tr><th>Item</th><th>Value in the period</th></tr></thead><tbody>';
+            uasort($singles, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+            foreach ($singles as $it) {
+                [$txt, $cls] = drCell($it);
+                if ($it['mapped'] && isset($it['last']) && drState(drMap($it, $it['last'])) < 0) $attention[] = [$title, $it['name'], $txt];
+                $html .= '<tr><td>' . h($it['name']) . '</td><td class="' . $cls . '">' . h($txt) . '</td></tr>';
+                $csv[] = [$name, $title, '', '', $it['name'], $txt];
+            }
+            $html .= '</tbody></table>';
+        }
+        $body .= '<div class="sec"><h2>' . h($title) . ' <span class="cnt">' . count($its) . ' items</span></h2>' . $html . '</div>';
+    }
+
+    // charts of the key figures this device has
+    $span = $to - $from;
+    $r = ['from' => $from, 'to' => $to, 'step' => drChartStep($span), 'aggs' => ['avg', 'min', 'max'], 'trends' => (int)drChartStep($span) >= 3600];
+    $byName = [];
+    foreach ($items as $it) if ($it['numeric']) $byName[$it['name']] = $it;
+    $charts = '';
+    $ci = [];
+    foreach (DR_CHARTS as $n) if (isset($byName[$n])) $ci[] = $byName[$n];
+    if ($ci) {
+        foreach ($ci as &$it) { [$it['unit'], $it['factor']] = $it['mapped'] ? ['', 1.0] : unitConv($it['units'], true); }
+        unset($it);
+        $data = fetchBuckets($db, $r + ['items' => $ci]);
+        foreach ($ci as $it) {
+            $s = $it['stats'];
+            $st = $s ? 'min <b>' . h(drNum($s['min'], $it['units'])) . '</b> &nbsp; avg <b>' . h(drNum($s['avg'], $it['units'])) . '</b> &nbsp; max <b>' . h(drNum($s['max'], $it['units'])) . '</b>' : '';
+            $charts .= '<div class="chart"><div class="t"><span class="name">' . h($it['name']) . ($it['unit'] !== '' ? ' (' . h($it['unit']) . ')' : '') . '</span><span class="st">' . $st . '</span></div>'
+                . chartSvg($it, $data[$it['itemid']] ?? [], $r) . '</div>';
+        }
+    }
+
+    // identity: inventory-like text values
+    $ident = [];
+    $cand = $items;   // device-level names ("Hardware model name") before per-module ones ("PowerSupply-1: ...")
+    usort($cand, fn($a, $b) => [preg_match('/^(Chassis|Switch System|Switch 1|SonicWall):|^[^:]+$/', $a['name']) ? 0 : 1, $a['name']]
+        <=> [preg_match('/^(Chassis|Switch System|Switch 1|SonicWall):|^[^:]+$/', $b['name']) ? 0 : 1, $b['name']]);
+    foreach (DR_IDENT as $re) {
+        foreach ($cand as $it) {
+            if (count($ident) >= 9) break 2;
+            if (!isset($it['last']) || isset($ident[$it['name']]) || preg_match(DR_IDENT_SKIP, $it['name']) || !preg_match($re, $it['name'])) continue;
+            $v = $it['mapped'] ? drMap($it, $it['last']) : ($it['numeric'] ? drNum((float)$it['last'], $it['units']) : trim((string)$it['last']));
+            if ($v !== '' && mb_strlen($v) < 200) { $ident[$it['name']] = $v; break; }
+        }
+    }
+    $ip = $host['interfaces'][0]['ip'] ?? '';
+    $groups = implode(', ', array_column($host['hostgroups'] ?? [], 'name'));
+    $templates = implode(', ', array_column($host['parentTemplates'] ?? [], 'name'));
+    $nUnsup = count(array_filter($items, fn($it) => $it['state'] === '1'));
+
+    $att = '';
+    if ($attention) {
+        $att = '<table class="list att"><thead><tr><th>Section</th><th>Item</th><th>State in the period</th></tr></thead><tbody>'
+            . implode('', array_map(fn($a) => '<tr><td>' . h($a[0]) . '</td><td>' . h($a[1]) . '</td><td class="bad">' . h($a[2]) . '</td></tr>', $attention))
+            . '</tbody></table>';
+    }
+    $prob = '';
+    if ($problems) {
+        $prob = '<table class="list"><thead><tr><th>Started</th><th>Ended</th><th>Duration</th><th>Severity</th><th>Problem</th></tr></thead><tbody>';
+        foreach ($problems as $p) {
+            $end = $p['end'] ?: min(time(), $to);
+            $prob .= '<tr><td>' . date('d M H:i', $p['start']) . '</td><td>' . ($p['end'] ? date('d M H:i', $p['end']) : '<b class="bad">open</b>')
+                . '</td><td>' . h(duration(max(0, $end - $p['start']))) . '</td><td class="sev' . $p['sev'] . '">' . DR_SEV[$p['sev']] . '</td><td>' . h($p['name']) . '</td></tr>';
+            $csv[] = [$name, 'Problems', DR_SEV[$p['sev']], date('Y-m-d H:i', $p['start']), $p['name'], $p['end'] ? date('Y-m-d H:i', $p['end']) : 'open'];
+        }
+        $prob .= '</tbody></table>';
+    }
+    foreach ($attention as $a) $csv[] = [$name, 'Needs attention', $a[0], '', $a[1], $a[2]];
+
+    $html = '<div class="dev"><div class="devhead"><div class="kicker">Device report</div><h1>' . h($name) . '</h1>'
+        . '<p>' . h(implode(' · ', array_filter([$ip, $groups]))) . '</p></div>'
+        . '<table class="facts">' . implode('', array_map(fn($k, $v) => '<tr><th>' . h($k) . '</th><td>' . h($v) . '</td></tr>', array_keys($ident), $ident))
+        . '<tr><th>Monitoring</th><td>' . count($items) . ' items reported' . ($nUnsup ? " ($nUnsup not supported by the device)" : '') . ' · template ' . h($templates) . '</td></tr></table>'
+        . '<h2>Needs attention now <span class="cnt">' . count($attention) . '</span></h2>'
+        . ($att ?: '<p class="good">Nothing is in a failed / down state at the end of the period.</p>')
+        . '<h2>Problems in the period <span class="cnt">' . count($problems) . '</span></h2>' . ($prob ?: '<p class="good">No problems were raised.</p>')
+        . ($charts ? '<div class="sec"><h2>Key figures</h2>' . $charts . '</div>' : '')
+        . $body . '</div>';
+    return [$html, $csv];
+}
+
+function deviceReport(mysqli $db, array $hostids, int $from, int $to, string $format, string $ports): string {
+    $hosts = api('host.get', ['hostids' => $hostids, 'output' => ['hostid', 'host', 'name'], 'selectInterfaces' => ['ip'],
+        'selectHostGroups' => ['name'], 'selectParentTemplates' => ['name'], 'sortfield' => 'name']);
+    if (!$hosts) throw new InvalidArgumentException('None of the selected devices are available to your account.');
+    $period = date('d M Y, H:i', $from) . ' – ' . date('d M Y, H:i', $to) . ' IST';
+    $parts = []; $csv = [];
+    foreach ($hosts as $hst) {
+        [$html, $rows] = drDevice($db, $hst, $from, $to, $ports);
+        $parts[] = $html;
+        array_push($csv, ...$rows);
+    }
+    if ($format === 'csv') {
+        $fh = fopen('php://temp', 'w+');
+        fwrite($fh, "\xEF\xBB\xBF");
+        fputcsv($fh, ["Report period: $period"]);
+        fputcsv($fh, ['Device', 'Section', 'Table', 'Entity', 'Metric / item', 'Value in the period']);
+        foreach ($csv as $row) fputcsv($fh, $row);
+        rewind($fh);
+        return stream_get_contents($fh);
+    }
+    $names = implode(', ', array_column($hosts, 'name'));
+    $html = '<!doctype html><html><head><meta charset="utf-8"><style>
+@page { size: A4 landscape; margin: 11mm 10mm 12mm; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 8.5pt/1.35 "Noto Sans", "DejaVu Sans", sans-serif; color: #1f2933; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.cover { height: 185mm; position: relative; break-after: page; }
+.band { background: #0b4f8a; color: #fff; padding: 30mm 18mm 12mm; margin: -11mm -10mm 0; }
+.band .kicker, .devhead .kicker { font-size: 10pt; letter-spacing: .14em; text-transform: uppercase; opacity: .8; }
+.band h1 { font-size: 28pt; margin: 6pt 0 0; }
+.cv { padding: 10mm 7mm 0; font-size: 11pt; } .cv p { margin: 0 0 3mm; } .cv b { display: inline-block; width: 42mm; color: #616e7c; font-weight: 400; }
+.foot { position: absolute; bottom: 0; left: 7mm; right: 7mm; font-size: 8pt; color: #9aa5b1; border-top: 1px solid #d9e0e7; padding-top: 3mm; }
+.dev { break-before: page; }
+.devhead { background: #eef3f8; border-left: 4pt solid #0b4f8a; padding: 4mm 6mm; margin-bottom: 4mm; }
+.devhead h1 { font-size: 20pt; margin: 2pt 0; color: #0b4f8a; } .devhead p { margin: 0; color: #616e7c; }
+.devhead .kicker { color: #0b4f8a; }
+h2 { font-size: 12pt; margin: 5mm 0 2mm; color: #0b4f8a; border-bottom: 1px solid #c5d0db; padding-bottom: 1mm; }
+h3 { font-size: 9.5pt; margin: 4mm 0 1mm; }
+.cnt { font-size: 8pt; font-weight: 400; color: #616e7c; }
+.sum { margin: 0 0 2mm; font-size: 8pt; }
+.sec { break-before: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; margin-bottom: 2mm; }
+thead { display: table-header-group; } tr { break-inside: avoid; }
+th { background: #eef3f8; text-align: left; font-weight: 600; padding: 2.5pt 4pt; border-bottom: 1px solid #c5d0db; vertical-align: bottom; font-size: 7.5pt; }
+td { padding: 1.6pt 4pt; border-bottom: 1px solid #e6ebf0; vertical-align: top; font-size: 7.5pt; overflow-wrap: anywhere; }
+table.facts { width: auto; } table.facts th { background: none; border: 0; color: #616e7c; font-weight: 400; padding-right: 8mm; }
+table.facts td { border: 0; font-size: 8.5pt; }
+td.e { font-weight: 600; min-width: 42mm; max-width: 80mm; } th:first-child { min-width: 42mm; } td.n { white-space: nowrap; } td.txt { font-family: "DejaVu Sans Mono", monospace; font-size: 7pt; }
+.good { color: #1a7f37; } .bad { color: #c62828; font-weight: 600; } .mute { color: #8a96a3; }
+.sev5, .sev4 { color: #c62828; font-weight: 600; } .sev3 { color: #d9480f; } .sev2 { color: #b7791f; }
+.chart { break-inside: avoid; border: 1px solid #e3e8ee; border-radius: 4pt; padding: 1.5mm 3mm 0; margin-bottom: 2mm; }
+.chart .t { display: flex; justify-content: space-between; } .chart .name { font-weight: 600; } .chart .st { color: #616e7c; }
+.chart svg { width: 100%; height: auto; display: block; }
+.nodata { color: #9aa5b1; padding: 5mm 0; text-align: center; }
+</style></head><body>
+<div class="cover"><div class="band"><div class="kicker">Network monitoring · device report</div><h1>' . h(count($hosts) === 1 ? $hosts[0]['name'] : count($hosts) . ' devices') . '</h1></div>
+<div class="cv"><p><b>Reporting period</b>' . h($period) . ' (' . h(duration($to - $from)) . ')</p>
+<p><b>Devices</b>' . h($names) . '</p>
+<p><b>Generated</b>' . h(date('d M Y, H:i')) . ' IST by ' . h($_SESSION['user'] ?? '') . '</p>
+<p><b>Contents</b>per device: needs attention, problems, key figures, then every monitored item by section</p></div>
+<div class="foot">Source: Zabbix · isp.picloud.in · states: current value, then share of the period in each state (time-weighted) and number of changes · numbers: last · average · maximum over the period'
+        . ($to - $from > DR_TRENDS_AFTER ? ' (from hourly trends)' : '') . ' · "not supported" = the device does not answer that SNMP object</div></div>'
+        . implode('', $parts) . '</body></html>';
+    return htmlToPdf($html);
+}

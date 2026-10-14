@@ -45,16 +45,27 @@ MAP_LEGEND = "green up / red down / grey no module / dark grey shutdown"
 UP_DOWN = ((0, RED), (1, GREEN))
 HEALTH_HW_ITEMS = [  # switch page "Health and hardware" list: the health tiles' items, then fans, PSUs, temperatures
     "ICMP ping", "ICMP response time", "CPU utilization", "RAM: Memory utilization", "Flash: Space utilization",
-    "Uptime (network)", "*Fan*", "*Power supply*", "Board*", "Cpu temp*", "Inlet*", "Front-panel*", "Hotspot*"]
+    "Uptime (network)", "*Fan*", "*Power supply*", "Board*", "Cpu temp*", "Inlet*", "Front-panel*", "Hotspot*",
+    "CPU load average*", "VRF *: state"]   # the last two: add_model_items.py (Arista)
+# model-specific hardware states (add_model_items.py): CISCO-STACK chassis, CISCO-ENTITY-FRU power / fan tray / module,
+# Juniper yellow alarm. Their value maps differ, but in all of them 1 / 2 = ok / not present and >= 3 = a fault
+HW_STATE_ITEMS = ["Chassis: *", "Power supply *: status", "Fan tray *: status", "Module *: status",
+                  "Craft panel: yellow alarm"]
+HW_STATE_TH = ((0, GREEN), (3, RED))
+STATE_LABEL = '{{ITEM.NAME}.regsub("^(Chassis: |Craft panel: )?(.*?)(: status| status)?$", "\\2")}'
 PSU_TH = ((1, AMBER), (2, RED), (3, GREEN), (4, AMBER))   # entStateOper: 3 = enabled
 PCT_TH = ((0, GREEN), (70, AMBER), (90, RED))
 TEMP_TH = ((0, GREEN), (65, AMBER), (80, RED))
 TRAFFIC_TH = ((0, "E5EDF7"), (1000000, "BFD7F5"), (100000000, "7FB0EB"), (1000000000, "2563EB"))
 
 
+MAX_GRAPH_ITEMS = 50   # SVG_GRAPH_MAX_NUMBER_OF_METRICS (Zabbix 7.0 defines.inc.php)
+
+
 def svg(name, x, y, w, h, hosts, datasets, legend_lines=4, extra=()):
     """SVG graph; each dataset dict: items (pattern list), color, label, optional hosts/type/fill/width/agg.
-    Note: one graph plots at most ~100 items in total."""
+    Note: one graph plots at most MAX_GRAPH_ITEMS items in total (also when aggregated); Zabbix drops the rest
+    silently, so sums over all ports use the "Ports total: ..." items (add_port_totals.py)."""
     fields = []
     for n, ds in enumerate(datasets):
         p = f"ds.{n}."
@@ -83,11 +94,13 @@ def page_ref(prefix, page_no):
     return prefix + chr(65 + page_no // 26) + chr(65 + page_no % 26)
 
 
-def honeycomb(name, x, y, w, h, hostid, item_pattern, th, ref=None):
-    """Honeycomb map; with `ref`, a follow_graph() can graph the cell clicked in it."""
-    fields = [f(HOSTREF, "hostids.0", hostid), f(STR, "items.0", item_pattern),
+def honeycomb(name, x, y, w, h, hostid, item_pattern, th, ref=None, label=None):
+    """Honeycomb map of `item_pattern` (one pattern or a list); with `ref`, a follow_graph() can graph the cell
+    clicked in it. `label`: cell label expression (default SHORT_IF, switch port names like Gi1/0/1)."""
+    patterns = [item_pattern] if isinstance(item_pattern, str) else list(item_pattern)
+    fields = [f(HOSTREF, "hostids.0", hostid)] + [f(STR, f"items.{n}", p) for n, p in enumerate(patterns)] + [
               f(INT, "show.0", 1), f(INT, "show.1", 2),
-              f(INT, "primary_label_type", 0), f(STR, "primary_label", SHORT_IF),
+              f(INT, "primary_label_type", 0), f(STR, "primary_label", label or SHORT_IF),
               f(INT, "primary_label_size_type", 0), f(INT, "primary_label_bold", 1),
               f(INT, "secondary_label_type", 1), f(INT, "secondary_label_decimal_places", 0), f(INT, "rf_rate", 30)]
     if ref:
@@ -320,15 +333,15 @@ def build(z, cfg):
             svg("Fan speeds", 48, 53, 24, 5, me, [
                 {"items": ["Fan Tray * Fan *: Fan speed"], "color": "2E9E5B", "label": "Fan trays"},
                 {"items": ["PowerSupply* Fan *: Fan speed"], "color": "F59E0B", "label": "PSU fans"}], legend_lines=6),
-            # one graph plots at most ~100 items and each line sums every interface: one line per graph
+            # one graph plots at most 50 items: the sums over all ports are server-side items (add_port_totals.py)
             svg("In errors/s (all ports)", 0, 58, 12, 6, me, [
-                {"items": ["Interface *: Inbound packets with errors"], "color": RED, "label": "In errors", "agg": 5}]),
+                {"items": ["Health: Inbound errors, all ports"], "color": RED, "label": "In errors"}]),
             svg("Out errors/s (all ports)", 12, 58, 12, 6, me, [
-                {"items": ["Interface *: Outbound packets with errors"], "color": "F97316", "label": "Out errors", "agg": 5}]),
+                {"items": ["Health: Outbound errors, all ports"], "color": "F97316", "label": "Out errors"}]),
             svg("In discards/s (all ports)", 24, 58, 12, 6, me, [
-                {"items": ["Interface *: Inbound packets discarded"], "color": "7C3AED", "label": "In discards", "agg": 5}]),
+                {"items": ["Health: Inbound discards, all ports"], "color": "7C3AED", "label": "In discards"}]),
             svg("Out discards/s (all ports)", 36, 58, 12, 6, me, [
-                {"items": ["Interface *: Outbound packets discarded"], "color": "0EA5E9", "label": "Out discards", "agg": 5}]),
+                {"items": ["Health: Outbound discards, all ports"], "color": "0EA5E9", "label": "Out discards"}]),
             problems(f"{short} problems", 48, 58, 24, 6, hostid=hid),
         ]
         pages.append({"name": f"{host} ({short})", "widgets": w})

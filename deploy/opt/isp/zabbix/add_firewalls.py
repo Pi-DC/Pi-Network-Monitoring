@@ -15,7 +15,9 @@ Hosts (DEVICES): a device whose SNMP answers gets its full template; one that on
 only (tag snmp=pending); one that answers neither is created DISABLED. Re-running upgrades a device as soon as its
 SNMP answers (never downgrades), so after SNMP is opened on a firewall just run:
     python3 add_firewalls.py && python3 build_firewall_dashboard.py
-The 1G-VDOM switch's vendor is unknown until SNMP answers; its sysObjectID then picks the switch template.
+A switch with template None gets its template from sysObjectID once SNMP answers. The 1G-VDOM switch is a Nexus 3000
+(NX-OS): it skips the IOS-based Catalyst template (no memory-pool / ENVMON MIBs) for a PIDC copy of the stock
+Nexus template (setup_nexus).
 """
 import subprocess
 
@@ -23,6 +25,7 @@ import add_full_coverage
 import add_routers as R
 import add_switches
 import add_vmware_fabric as fab
+import model_templates
 import setup_isp_links as base
 
 GROUP = "Pi Firewall Fabric"
@@ -30,6 +33,7 @@ CRED = "/root/.credentials/"
 SONICWALL, SONICWALL_SRC = "SonicWall by SNMP - PIDC", "Network Generic Device by SNMP"
 FORTIGATE, FORTIGATE_SRC = "FortiGate by SNMP - PIDC", "FortiGate by SNMP"
 ICMP_ONLY = fab.ICMP_ONLY
+NEXUS, NEXUS_SRC = "Cisco Nexus by SNMP - PIDC", "Cisco Nexus 9000 Series by SNMP"   # fits NX-OS N3K too
 DEVICES = [  # host, visible name, IP, model, template (None = switch, by sysObjectID), vendor, role, community file
     ("Sonicwall-NSA4600-Primary", "Sonicwall-NSA4600-Primary (PIDC-Sonicwall)", "172.20.96.14", "SonicWall NSA 4600",
      SONICWALL, "sonicwall", "firewall", "sonicwall_nsa_snmp_community"),     # SonicOS 6.5.4.12, HA active
@@ -43,8 +47,8 @@ DEVICES = [  # host, visible name, IP, model, template (None = switch, by sysObj
      FORTIGATE, "fortinet", "firewall", "fortigate_300e_snmp_community"),
     ("Fortigate-200F", "Fortigate-200F", "172.20.117.16", "FortiGate 200F",
      FORTIGATE, "fortinet", "firewall", "fortigate_200f_snmp_community"),
-    ("1G-VDOM-SW", "1G-VDOM-SW", "172.20.96.206", "switch",
-     None, None, "switch", "vmware_fabric_snmp_community"),                   # __REDACTED__
+    ("1G-VDOM-SW", "1G-VDOM-SW", "172.20.96.206", "Nexus 3000",
+     NEXUS, "cisco", "switch", "vdom_sw_snmp_community"),                     # NX-OS 6.0(2)U6; SNMP since 2026-10-14
 ]
 # sysObjectID enterprise -> (switch template, vendor tag) for the switch
 SWITCH_VENDORS = {"30065": (fab.ARISTA, "arista"), "9": (fab.CATALYST, "cisco"), "2011": (fab.HUAWEI, "huawei"),
@@ -214,6 +218,37 @@ def setup_fortigate(z):
     fab.health_items(z, FORTIGATE)
 
 
+# The stock Nexus template discovers CPU / memory via cpmCPUTotalPhysicalIndex and CISCO-ENHANCED-MEMPOOL; NX-OS 6.0
+# on the N3K answers neither (both rules discover nothing), but CISCO-PROCESS-MIB row 1 has the values.
+CPM = "1.3.6.1.4.1.9.9.109.1.1.1.1"
+
+
+def setup_nexus(z):
+    fab.setup_snmp_get_template(z, NEXUS_SRC, NEXUS, (
+        "PIDC copy of 'Cisco Nexus 9000 Series by SNMP' for NX-OS switches (1G-VDOM-SW, N3K-C3048TP): traffic 10s, "
+        "status 30s, errors 1m, Admin status + Port state, CPU / memory from CISCO-PROCESS-MIB row 1. "
+        "Managed by /opt/isp/zabbix/add_firewalls.py."))
+    tid = fab.template_id(z, NEXUS)
+    cpu, mem = [{"tag": "component", "value": "cpu"}], [{"tag": "component", "value": "memory"}]
+    item(z, tid, "cisco.cpu.util", "CPU utilization (1 min)", f"{CPM}.7.1", units="%", tags=cpu)
+    for key, name, col in (("cisco.memory.used", "Memory used", 12), ("cisco.memory.free", "Memory free", 13)):
+        item(z, tid, key, name, f"{CPM}.{col}.1", units="B", tags=mem,      # cpmCPUMemoryUsed / Free, KB
+             preprocessing=R.pp((base.MULTIPLIER, "1024")))
+    item(z, tid, "cisco.memory.util", "Memory utilization", None, type=R.CALCULATED, value_type=R.FLOAT, units="%",
+         tags=mem, params="last(//cisco.memory.used)/(last(//cisco.memory.used)+last(//cisco.memory.free))*100")
+    # device_uptime.py --setup turns this one into the trapper 'Uptime (network)' (as on every other PIDC template)
+    item(z, tid, "system.net.uptime[sysUpTime.0]", "Uptime (network)", "1.3.6.1.2.1.1.3.0", "5m",
+         units="uptime", trends="0", preprocessing=R.pp((base.MULTIPLIER, "0.01")),
+         tags=[{"tag": "component", "value": "system"}])
+    trigger(z, NEXUS, "High CPU utilization (over {$CPU.UTIL.CRIT}% for 5m)",
+            f"min(/{NEXUS}/cisco.cpu.util,5m)>{{$CPU.UTIL.CRIT}}", 2)
+    trigger(z, NEXUS, "High memory utilization (>{$MEMORY.UTIL.MAX}% for 5m)",
+            f"min(/{NEXUS}/cisco.memory.util,5m)>{{$MEMORY.UTIL.MAX}}", 3)
+    # CISCO-ENTITY-FRU-CONTROL-MIB: cefcFanTrayOperStatus 2 = up, cefcFRUPowerOperStatus 2 = on
+    fab.HEALTH[NEXUS] = {"cpu": "last(//cisco.cpu.util)", "mem": "last(//cisco.memory.util)", "fan_ok": 2, "psu_ok": 2}
+    fab.health_items(z, NEXUS)
+
+
 # ---------------------------------------------------------------------------------------------------- hosts
 def sync_address(z, hostid, host, ip, community):
     """Existing host: follow IP / community changes made in DEVICES or the credential file."""
@@ -262,7 +297,9 @@ def ensure_host(z, gid, dev):
     h = found[0]
     sync_address(z, h["hostid"], host, ip, community)
     linked = {t["host"]: t["templateid"] for t in h["parentTemplates"]}
-    if oid and template not in linked:   # SNMP answers now: upgrade from ICMP only (never the other way round)
+    # SNMP answers now: upgrade from ICMP only (never the other way round); a model template (model_templates.py)
+    # has the vendor template nested, so the host is already on it
+    if oid and not model_templates.uses_template(z, h["parentTemplates"], template):
         if ICMP_ONLY in linked:   # the full templates have their own ICMP items (same keys): unlink + clear first
             z.call("host.update", {"hostid": h["hostid"], "templates_clear": [{"templateid": linked[ICMP_ONLY]}]})
         z.call("host.update", {"hostid": h["hostid"], "status": 0, "tags": tags,
@@ -278,6 +315,7 @@ def main():
     z = base.Zabbix()
     setup_sonicwall(z)
     setup_fortigate(z)
+    setup_nexus(z)
     import add_firewall_detail   # VPN / SSL VPN / FortiGuard / security / policy / HA / logging detail
     add_firewall_detail.main(z)
     t = add_full_coverage.Template(z, SONICWALL)

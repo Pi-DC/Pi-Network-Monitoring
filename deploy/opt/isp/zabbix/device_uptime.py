@@ -89,11 +89,17 @@ def setup_template(z, t):
 
 
 def setup(z):
-    found = z.call("item.get", {"templated": True, "filter": {"key_": NET}, "output": ["hostid"]})
-    for t in z.call("template.get", {"templateids": list({i["hostid"] for i in found}),
-                                     "output": ["templateid", "host"], "selectHosts": "count"}):
-        if int(t["hosts"]):   # only templates linked directly to hosts
-            setup_template(z, t)
+    # templates that own the uptime item (not inherited: a model template has it from its nested vendor template,
+    # model_templates.py) and are in use by a host, directly or through a model template
+    found = z.call("item.get", {"templated": True, "filter": {"key_": NET}, "output": ["hostid", "templateid"]})
+    owners = {i["hostid"] for i in found if i["templateid"] == "0"}
+    used = {t["templateid"] for h in z.call("host.get", {"output": ["hostid"], "selectParentTemplates": ["templateid"]})
+            for t in h["parentTemplates"]}
+    used |= {p["templateid"] for t in z.call("template.get", {"templateids": list(used), "output": ["templateid"],
+                                                              "selectParentTemplates": ["templateid"]})
+             for p in t["parentTemplates"]}
+    for t in z.call("template.get", {"templateids": list(owners & used), "output": ["templateid", "host"]}):
+        setup_template(z, t)
 
 
 # ---------------------------------------------------------------- run
@@ -136,6 +142,10 @@ def run(z):
             continue   # device not answering: send nothing (no false "restarted")
         value, clock = r[src]
         st = state.get(hid)
+        if st and st["src"] == src and clock <= st["clock"] \
+                and (hid not in seeds or seeds[hid] == st.get("seed")):
+            continue   # raw items poll every 5 min, this runs every minute: resending a reading is a duplicate row
+
         if not st or st["src"] != src:   # first reading from this source: roll-overs from before monitoring
             n = 0
             if src != RAW_ENT and RAW_ENGINE in r:   # the device has been up at least as long as its SNMP agent

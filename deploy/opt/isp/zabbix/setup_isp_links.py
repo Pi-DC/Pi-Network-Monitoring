@@ -73,9 +73,10 @@ class Zabbix:
 
 
 def pp(*steps):
-    """Preprocessing steps as (type, params) or (type, params, error_handler)."""
-    return [{"type": t, "params": p, "error_handler": rest[0] if rest else 0, "error_handler_params": ""}
-            for t, p, *rest in steps]
+    """Preprocessing steps as (type, params), (type, params, error_handler) or (type, params, error_handler,
+    error_handler_params) - e.g. error handler 2 = set value to error_handler_params."""
+    return [{"type": t, "params": p, "error_handler": rest[0] if rest else 0,
+             "error_handler_params": rest[1] if len(rest) > 1 else ""} for t, p, *rest in steps]
 
 
 def macro_bw(isp):
