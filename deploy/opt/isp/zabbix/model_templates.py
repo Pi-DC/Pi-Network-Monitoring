@@ -182,7 +182,7 @@ def main():
             z.call("task.create", [{"type": 6, "request": {"itemid": i}} for i in new])
             print("Chassis model items created - run again in a few minutes to move the hosts")
             return
-    unknown = []
+    unknown, moved = [], 0
     for h in sorted(z.call("host.get", {"output": ["hostid", "host"], "selectParentTemplates": ["templateid", "host"]}),
                     key=lambda h: h["host"]):
         linked = {t["host"]: t["templateid"] for t in h["parentTemplates"]}
@@ -202,6 +202,10 @@ def main():
                 print(f"  + template {model + SUFFIX}")
             keep = [{"templateid": t} for n, t in linked.items() if n != vendor]
             z.call("host.update", {"hostid": h["hostid"], "templates": keep + [{"templateid": tid}]})   # unlink, not clear
+            moved += 1
+    if moved:   # relinking resets host-level item status - re-apply the device quirks (found in the 2026-10-15 audit)
+        import fix_snmp_quirks
+        print(f"device quirks re-applied: {fix_snmp_quirks.disable_unsupported(z)} items/rules disabled")
     for host, vendor, text in unknown:
         print(f"! {host}: model not recognised for {vendor} ({text or 'no model / sysDescr value yet'}) - stays on it")
 

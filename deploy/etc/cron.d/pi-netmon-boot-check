@@ -1,0 +1,3 @@
+# After every reboot: check all services / Zabbix / reports came back and e-mail the result (watchdog recipients).
+# Script: /opt/isp/zabbix/boot_check.py
+@reboot root sleep 300; cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py boot_check -- /usr/bin/timeout 900 /usr/bin/python3 boot_check.py >> /var/log/zabbix/boot-check.log 2>&1

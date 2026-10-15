@@ -404,6 +404,56 @@ def tags(*pairs):
     return [{"tag": t, "value": v} for t, v in pairs]
 
 
+# FortiGate hardware sensors are one table (fgHwSensors) with free-form names that differ per model, e.g.
+# 200F 'FAN 1  CPU FAN' / 'TMP 1  CPUTIN' / 'PSU [1]', 300E 'Fan 1' / 'TD1' / 'PS1 Status', 120G 'SYS Fan1 Speed' /
+# 'CPU ON-DIE Temperature'. The shared 'Health: ...' items (written for switches: sensor.fan.status[*] etc.) were
+# therefore empty and the dashboard tiles hidden (audit 2026-10-15). LLD now types each sensor from its name
+# ({#SENSOR.TYPE}: fan / temp / psu = PSU state / psu_reading / voltage / other, tag sensor_type) and a numeric
+# 'Reading' item is taken from the same walk (the stock value item is text, so it cannot be graphed or aggregated).
+SENSOR_TYPE_JS = r"""
+return JSON.stringify(JSON.parse(value).map(function (r) {
+    var n = r['{#SENSOR.NAME}'] || '', t = 'other';
+    if (/^PSU \[\d+\]$|^PS\d+ Status$/i.test(n)) t = 'psu';
+    else if (/^PS\d+ /i.test(n)) t = 'psu_reading';
+    else if (/fan/i.test(n)) t = 'fan';
+    else if (/temp|^TMP|DTS|PECI|^T[DR]\d|LM75|MV1680/i.test(n)) t = 'temp';
+    else if (/^VOL|V\d|VCC|VTT|VPP|VCORE|VDD|VIN|VOUT/i.test(n)) t = 'voltage';
+    r['{#SENSOR.TYPE}'] = t;
+    return r;
+}));
+"""
+SENSOR_HEALTH = {   # key -> calculated formula over the typed sensors
+    "health.fans.bad": 'count(last_foreach(//hw.sensor.status[*]?[tag="sensor_type:fan"]),"ne",0)',
+    "health.psu.bad": 'count(last_foreach(//hw.sensor.num[*]?[tag="sensor_type:psu"]),"ne",1)',   # 1 = OK, -1 = no reading
+    "health.temp.max": 'max(last_foreach(//hw.sensor.num[*]?[tag="sensor_type:temp"]))',
+}
+
+
+def sensor_health(z, tid, snrule):
+    r = z.call("discoveryrule.get", {"itemids": snrule, "output": ["itemid"], "selectPreprocessing": "extend"})[0]
+    steps = [{k: p[k] for k in ("type", "params", "error_handler", "error_handler_params")} for p in r["preprocessing"]]
+    if not any(s["type"] == str(JS) and "{#SENSOR.TYPE}" in s["params"] for s in steps):
+        steps.insert(1, {"type": str(JS), "params": SENSOR_TYPE_JS.strip(), "error_handler": "0", "error_handler_params": ""})
+        z.call("discoveryrule.update", {"itemid": snrule, "preprocessing": steps})
+    stype = {"tag": "sensor_type", "value": "{#SENSOR.TYPE}"}
+    for p in z.call("itemprototype.get", {"discoveryids": snrule, "output": ["itemid", "key_"], "selectTags": ["tag", "value"]}):
+        if stype not in p["tags"]:
+            z.call("itemprototype.update", {"itemid": p["itemid"], "tags": p["tags"] + [stype]})
+    walk = z.call("item.get", {"templateids": tid, "filter": {"key_": "hw.sensor.walk"}, "output": ["itemid"]})[0]["itemid"]
+    proto(z, tid, snrule, "hw.sensor.num[{#SENSOR.ID}]", "Sensor {#SENSOR.NAME}: Reading", type=DEP, master_itemid=walk,
+          value_type=FLOAT, trends="730d", tags=tags(("component", "sensor"), ("sensor", "{#SENSOR.NAME}")) + [stype],
+          preprocessing=base.pp((WALK_VALUE, f"{FG}.4.3.2.1.3.{{#SENSOR.ID}}\n0")),
+          description="fgHwSensorEntValue as a number (temperatures in C, fans in RPM, PSU state 1 = OK).")
+    for i in z.call("item.get", {"templateids": tid, "filter": {"key_": list(SENSOR_HEALTH)}, "output": ["itemid", "key_", "params"]}):
+        if i["params"] != SENSOR_HEALTH[i["key_"]]:
+            z.call("item.update", {"itemid": i["itemid"], "params": SENSOR_HEALTH[i["key_"]]})
+    # the FortiGate's own alarm flag stays 0 for a PSU that reports nothing at all (300E PS2: every reading -1)
+    trigger(z, tid, "Power supply not OK ({ITEM.LASTVALUE1} PSU failed, missing or without power)",
+            f"min(/{FORTIGATE}/health.psu.bad,5m)>0", 3, tags=tags(("component", "sensor")),
+            comments="Counts PSU state sensors ('PSU [n]', 'PSn Status') whose reading is not 1 (OK). -1 = the PSU "
+                     "reports nothing: not installed, no input power or failed. Check 'Sensor PS*' readings.")
+
+
 WALK_TIMEOUT = "15s"   # FortiGate agents answer walks slowly while other walks run (default SNMP timeout is 3 s)
 
 
@@ -758,6 +808,7 @@ def fortigate(z):
     trigger_proto(z, snrule, "Hardware sensor {#SENSOR.NAME} in alarm",
                   f"last(/{FORTIGATE}/hw.sensor.status[fgHwSensorEntAlarmStatus.{{#SENSOR.ID}}])=1", 3,
                   tags=tags(("component", "sensor")))
+    sensor_health(z, tid, snrule)
     walk_timeouts(z, tid)
     # ---- FortiAP: the stock AP items read the WTP session table, but its walk covers only the WTP config table
     apw = z.call("item.get", {"templateids": tid, "filter": {"key_": "wireless.ap.walk"}, "output": ["itemid"]})[0]["itemid"]

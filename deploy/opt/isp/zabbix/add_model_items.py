@@ -62,6 +62,45 @@ return JSON.stringify(out);""")
              f"max({t.k('pidc.bgp4.state[{#PEER}]')},5m)<6 and last({t.k('pidc.bgp4.admin[{#PEER}]')})<>1",
              AVERAGE, "bgp", comments="Not Established for 5 minutes and not shut down on purpose (admin stop); also when the peer has gone "
                       "from the device's BGP table.")
+    fortigate_bgp_flapping(t, rid, m, p, tg)
+
+
+CALC = 15
+
+
+def fortigate_bgp_flapping(t, rid, m, p, tg):
+    """Branch flapping summary (2026-10-15, user request after the 120G SD-WAN hub showed 337 peer drops / 24 h).
+    bgpPeerFsmEstablishedTransitions (col 15) counts every session reset, also those shorter than the 1-minute state
+    poll (the 10:18 MPLS-wide reset never showed as 'not established'). Per peer: resets in the last hour / 5 minutes
+    = number of counter INCREASES (changecount 'inc'), so a counter that restarts when the FortiGate re-creates a
+    dynamic peer cannot fake a burst. Two summary alerts per FortiGate; the per-peer alerts stay as they are."""
+    walk = t.z.call("item.get", {"itemids": m, "output": ["snmp_oid"]})[0]["snmp_oid"]
+    if f"{p}.15" not in walk:
+        t.z.call("item.update", {"itemid": m, "snmp_oid": walk[:-1] + f",{p}.15]"})
+    t.macro("{$BGP.FLAP.MAX}", "3", "BGP peer counts as flapping at this many session resets in one hour")
+    t.macro("{$BGP.MASS.RESET.MIN}", "10", "Mass BGP reset alert: this many peers reset within 5 minutes")
+    t.proto(rid, "pidc.bgp4.resets[{#PEER}]", "BGP peer {#PEER.IP} (AS{#REMOTE_AS}): session resets (counter)", m,
+            [wv(f"{p}.15.{{#PEER}}")], value_type=UINT, history="7d", trends="0", tags=tg,   # every poll: changecount needs 2+ values
+            description="bgpPeerFsmEstablishedTransitions: times the session has come up (each = one reset).")
+    for key, period, label in (("flaps.1h", "1h", "last hour"), ("flaps.5m", "5m", "last 5 minutes")):
+        t.proto(rid, f"pidc.bgp4.{key}[{{#PEER}}]", f"BGP peer {{#PEER.IP}} (AS{{#REMOTE_AS}}): resets in the {label}", None, None,
+                type=CALC, delay="1m", value_type=UINT, tags=tg,
+                params=f'changecount(//pidc.bgp4.resets[{{#PEER}}],{period},"inc")')
+    t.item("pidc.bgp4.flapping", name="BGP: peers flapping ({$BGP.FLAP.MAX}+ resets in the last hour)", type=CALC,
+           delay="1m", value_type=UINT, trends="730d", tags=tg,
+           params='count(last_foreach(//pidc.bgp4.flaps.1h[*]),"ge",{$BGP.FLAP.MAX})')
+    t.item("pidc.bgp4.resets.1h", name="BGP: session resets in the last hour (all peers)", type=CALC, delay="1m",
+           value_type=UINT, trends="730d", tags=tg, params="sum(last_foreach(//pidc.bgp4.flaps.1h[*]))")
+    t.item("pidc.bgp4.mass", name="BGP: peers reset in the last 5 minutes", type=CALC, delay="1m", value_type=UINT,
+           trends="730d", tags=tg, params='count(last_foreach(//pidc.bgp4.flaps.5m[*]),"gt",0)')
+    t.trigger("Branch BGP flapping: {ITEM.LASTVALUE1} peer(s) reset {$BGP.FLAP.MAX}+ times in the last hour",
+              f"last({t.k('pidc.bgp4.flapping')})>0", 2, "bgp", manual_close=1,
+              comments="Summary of unstable BGP peers (branch links). Which ones: latest data, items "
+                       "'BGP peer *: resets in the last hour' sorted by value. Threshold {$BGP.FLAP.MAX} (template/host macro).")
+    t.trigger("Mass BGP reset: {ITEM.LASTVALUE1} peers reset within 5 minutes",
+              f"last({t.k('pidc.bgp4.mass')})>={{$BGP.MASS.RESET.MIN}}", AVERAGE, "bgp", manual_close=1,
+              comments="Many BGP sessions reset together: an underlay / carrier event (e.g. all MPLS overlay peers) or "
+                       "a BGP restart on this FortiGate. Threshold {$BGP.MASS.RESET.MIN}.")
 
 
 def fortigate_system(t):

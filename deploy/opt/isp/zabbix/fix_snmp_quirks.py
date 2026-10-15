@@ -11,8 +11,8 @@
     per-VLAN STP, counters of the unused half of 2960X dual-purpose uplinks, Zabbix server self-monitoring of
     processes that are not configured (connector, IPMI, Java, VMware, SNMP trapper).
   - Discovery rules the device cannot answer are disabled on the host (RULES_NOT_SUPPORTED): the HPE agent of
-    10G_Leaf_SW-7-8 stalls in entPhysicalDescr after 10 rows (>10 s); its temperatures come from the HPE
-    entity-extension health items instead.
+    10G_Leaf_SW-7-8 stalled in entPhysicalDescr (>10 s) with the old discovery[] rule; since walk_discovery.py
+    (2026-10-15, GETBULK, 15 s) it answers in < 1 s, so nothing is disabled there any more.
 """
 import setup_isp_links as base
 
@@ -37,6 +37,16 @@ NOT_SUPPORTED = {   # host -> item keys to disable
                         "pidc.stp.since", "pidc.stp.tc"],
     "1G-COLO-DH5-SW5": ["pidc.if.in.bcast[1]", "pidc.if.in.mcast[1]", "pidc.stp.root", "pidc.stp.rootport",
                         "pidc.stp.since", "pidc.stp.tc"],
+    # SonicOS has no snmpEngineTime and no EtherLike-MIB (so no FCS items to total)
+    "Sonicwall-NSA4600-Primary": ["snmp.raw.enginetime", "pidc.if.total.fcs"],
+    "Sonicwall-NSA4600-Secondary": ["snmp.raw.enginetime", "pidc.if.total.fcs"],
+    "Sonicwall-TZ500-GNOC": ["snmp.raw.enginetime", "pidc.if.total.fcs"],
+    # FortiGates without a log disk: disk total 0 -> free % divides by zero
+    "Fortigate-200F": ["vfs.fs.pfree"],
+    "Fortigate-300E": ["vfs.fs.pfree"],
+    # the 120G never answers its IP-pool table; the hanging 15-min walk stalled the agent, so every other walk
+    # timed out at :01/:16/:31/:46 (~511 items unsupported for ~25 s each time) - found 2026-10-15, user approved
+    "GE17-PiSB-Forti120G": ["vfs.fs.pfree", "fg.ippool.walk", "fg.ippool.json", "fg.ippool.max", "fg.ippool.worst"],
     "Zabbix server": ["zabbix[connector_queue]", "zabbix[process,connector manager,avg,busy]",
                       "zabbix[process,connector worker,avg,busy]", "zabbix[process,ipmi manager,avg,busy]",
                       "zabbix[process,ipmi poller,avg,busy]", "zabbix[process,java poller,avg,busy]",
@@ -45,7 +55,7 @@ NOT_SUPPORTED = {   # host -> item keys to disable
 }
 
 
-RULES_NOT_SUPPORTED = {"10G_Leaf_SW-7-8": ["temp.discovery"]}
+RULES_NOT_SUPPORTED = {}   # 10G_Leaf_SW-7-8 temp.discovery works again since walk_discovery.py (2026-10-15)
 
 
 def chassis_index(z):

@@ -86,6 +86,26 @@ def setup_template(z, t):
             z.call("item.update", {"itemid": it["itemid"], "type": 2, "params": "", "snmp_oid": "",
                                    "preprocessing": [], "description": DESCRIPTION})
             print(f"{t['host']}: {key} -> device uptime (trapper)")
+    restart_trigger(z, t)
+
+
+RESTART = "Device has been restarted (uptime {ITEM.LASTVALUE1})"
+
+
+def restart_trigger(z, t):
+    """Every device gets a reboot alert (fleet audit 2026-10-15: the Cisco Catalyst/ASR, Huawei, HPE and SonicWall
+    templates had none). Templates that already have one (Arista/A10/Juniper 'Host has been restarted', FortiGate,
+    Nexus) are left alone; the device uptime sent by this script is the source, so an agent restart or a 497-day
+    roll-over does not alert. Warning, so it is e-mailed; it resolves itself after 10 minutes of uptime."""
+    have = z.call("trigger.get", {"templateids": t["templateid"], "output": ["description"], "inherited": None})
+    if any("restarted" in x["description"].lower() for x in have):
+        return
+    z.call("trigger.create", {"description": RESTART, "priority": 2, "manual_close": 1,
+                              "expression": f"last(/{t['host']}/{NET})<10m",
+                              "tags": [{"tag": "component", "value": "system"}, {"tag": "scope", "value": "availability"}],
+                              "comments": "The device's own uptime (see 'Uptime (network)') is under 10 minutes: it "
+                                          "rebooted or was power-cycled."})
+    print(f"{t['host']}: + trigger '{RESTART}'")
 
 
 def setup(z):

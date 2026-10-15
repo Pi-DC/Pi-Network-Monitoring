@@ -3,6 +3,51 @@
 Changes to the Pi Network Monitoring tool, newest first. Every configuration change is also visible in the git
 history of `deploy/` (nightly "Configuration snapshot" commits).
 
+## 2026-10-15
+
+### SNMP fleet audit (switches, firewalls, routers, A10)
+- Discovery: the old-style `discovery[]` LLD rules of 'Huawei VRP by SNMP - PIDC' and 'HPE Comware by SNMP - PIDC'
+  (12 rules) are now `walk[]` + "SNMP walk to JSON" with a 15 s timeout (`zabbix/walk_discovery.py`). They timed out
+  at the global 10 s about every other hour on the S5720-LI switches and the HPE 5820, so new ports/sensors could
+  go undiscovered for hours. Same rule keys - no item, trigger or history lost (checked on all 7 hosts).
+  10G_Leaf_SW-7-8 temperature discovery works again and is no longer disabled.
+- Device quirks: the model-template relink of 2026-10-14 had re-enabled 22 items the devices cannot answer
+  (stack ring on standalone switches, BRIDGE-MIB STP on PVST 3650s, SonicWall snmpEngineTime / FCS total,
+  FortiGate free-disk % without a disk). `fix_snmp_quirks.py` lists them all again, and `model_templates.py` now
+  re-applies the quirks whenever it moves a host.
+- GE17-PiSB-Forti120G: IP-pool items (fg.ippool.walk/json/max/worst) disabled on the host again (user approved;
+  they were disabled before and re-enabled by the relink). The 120G never answers that table, and the hanging
+  15-min walk stalled its SNMP agent so ~511 CPU / dial-up VPN items went unsupported for ~25 s at :01/:16/:31/:46.
+  This also removes that host's "IP pool over 90% used" trigger, which could never fire there.
+- HPE 10G_Leaf_SW-7-8: both IRF members call their main board "Board", so CPU/memory items, triggers and graphs
+  had the same name and LLD refused the second graph. module.discovery now adds the IRF member to duplicate names
+  ("Board (member 1): CPU utilization"; `walk_discovery.module_names`). Keys unchanged, history kept.
+- FortiGate Health tiles (fans not OK, PSUs not OK, highest temperature) work: sensors get a `sensor_type` tag from
+  their name (fan / temp / psu / psu_reading / voltage / other), a numeric 'Sensor X: Reading' item comes from the
+  same walk (the stock value item is text), and the Health formulas use them (`add_firewall_detail.sensor_health`);
+  `build_fabric_dashboard.has_sensor` recognises the tags. PSU state counts sensors 'PSU [n]' / 'PSn Status' with a
+  value other than 1 - Fortigate-300E shows 1 (PS2 reads -1 on every sensor).
+- Alerts for everything (user request): every health/state item now has an e-mailed alert (>= Warning).
+  - Reboot: "Device has been restarted (uptime ...)" (Warning, uptime < 10 min, from the device's own uptime) on
+    the Cisco Catalyst, Cisco ASR920, Huawei VRP, HPE Comware, Juniper and SonicWall templates - 25 devices had no
+    reboot alert. `device_uptime.restart_trigger`, run by the hourly `--setup`, so new vendor templates get it too.
+  - FortiGate: "Power supply not OK" (Average) from Health: PSUs not OK - fires on Fortigate-300E (PS2 reports
+    nothing; the FortiGate's own alarm flag stays off).
+  - Temperature sensors (`add_alert_coverage.py`): Arista sensor nonoperational (Warning); Cisco Catalyst
+    temperature state warning (Warning) / critical, shutdown, not functioning (High).
+  - Remaining items without a trigger are counters, rates, inventory text or companions of items that alert
+    (checked per category); SonicWall and A10 report no fan/PSU/temperature data over SNMP.
+- FortiGate BGP flapping summary (user request after the 120G SD-WAN hub showed 337 branch peer drops in 24 h;
+  `add_model_items.fortigate_bgp_flapping`): bgpPeerFsmEstablishedTransitions added to the BGP walk; per peer
+  'session resets (counter)' + 'resets in the last hour / 5 minutes' (changecount of increases, so counter restarts
+  of re-created dynamic peers don't count; also catches resets shorter than the 1-minute state poll). Summary items
+  'BGP: peers flapping', 'BGP: session resets in the last hour', 'BGP: peers reset in the last 5 minutes'. Alerts:
+  "Branch BGP flapping: N peer(s) reset {$BGP.FLAP.MAX}(3)+ times in the last hour" (Warning) and "Mass BGP reset:
+  N peers reset within 5 minutes" (>= {$BGP.MASS.RESET.MIN} = 10, Average). Per-peer alerts unchanged.
+- Management ports: Huawei MEth (10G_Leaf_SW-3-4, H1-SPINE3-4) and Juniper bme0 are now discovered
+  (`{$NET.IF.IFNAME.NOT_MATCHES}` / Juniper `{$NET.IF.IFNAME.MATCHES}`); the A10 management port gained admin status,
+  speed, errors/discards and a link-down trigger (`add_a10_full.py`).
+
 ## 2026-10-13
 
 ### E-mail: subject tag, sender and recipients

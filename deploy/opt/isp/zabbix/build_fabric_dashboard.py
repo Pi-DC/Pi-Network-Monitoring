@@ -88,6 +88,9 @@ def port_count(z, h):
     return len(z.call("item.get", {"hostids": h["hostid"], "output": ["itemid"], "search": {"key_": "net.if.portstate["}}))
 
 
+FORTI_SENSOR_TYPE = {"sensor.temp.value": "temp", "sensor.fan.status": "fan", "sensor.psu.status": "psu"}
+
+
 def has_sensor(z, h, sensor_key, health_key, health_name):
     """True if the switch reports any `sensor_key` item (temperature, fan or PSU sensors). Its matching health
     item is enabled or disabled to match (it is empty or always 0 without sensors - e.g. no temperature on a
@@ -95,6 +98,9 @@ def has_sensor(z, h, sensor_key, health_key, health_name):
     the page leaves out that tile and graph."""
     sensors = z.call("item.get", {"hostids": h["hostid"], "search": {"key_": sensor_key + "["},
                                   "filter": {"status": 0}, "output": ["itemid"], "limit": 1})
+    if not sensors and sensor_key in FORTI_SENSOR_TYPE:   # FortiGate: one typed hw.sensor table (add_firewall_detail)
+        sensors = z.call("item.get", {"hostids": h["hostid"], "filter": {"status": 0}, "output": ["itemid"], "limit": 1,
+                                      "tags": [{"tag": "sensor_type", "value": FORTI_SENSOR_TYPE[sensor_key], "operator": 1}]})
     item = z.call("item.get", {"hostids": h["hostid"], "filter": {"key_": health_key},
                                "output": ["itemid", "status"]})
     want = "0" if sensors else "1"

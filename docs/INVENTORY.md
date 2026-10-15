@@ -84,6 +84,7 @@ Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-dev
 ## Scheduled jobs (`/etc/cron.d`)
 
 - `pi-netmon-backup`: `0 21 * * * root /usr/bin/python3 /opt/isp/backup/backup.py >> /var/log/pi-netmon-backup.log 2>&1`
+- `pi-netmon-boot-check`: `@reboot root sleep 300; cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py boot_check -- /usr/bin/timeout 900 /usr/bin/python3 boot_check.py >> /var/log/zabbix/boot-check.log 2>&1`
 - `pi-netmon-watchdog`: `*/2 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py watchdog -- /usr/bin/timeout 900 /usr/bin/python3 watchdog.py >> /var/log/zabbix/watchdog.log 2>&1`
 - `zabbix-click-to-graph`: `*/10 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py click_to_graph -- /usr/bin/python3 click_to_graph.py >> /var/log/zabbix/click-to-graph.log 2>&1`
 - `zabbix-daily-reports`: `15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py sync_daily_reports -- /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1`

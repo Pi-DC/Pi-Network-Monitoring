@@ -27,10 +27,10 @@ CATALYST, CATALYST_SRC = "Cisco Catalyst by SNMP - PIDC", "Cisco IOS by SNMP"
 HUAWEI, HUAWEI_SRC = "Huawei VRP by SNMP - PIDC", "Huawei VRP by SNMP"   # S5720 (1G colo fabric)
 JUNIPER, JUNIPER_SRC = "Juniper by SNMP - PIDC", "Juniper by SNMP"   # EX3400 (1G-WAN-Extension-SW)
 # Per-vendor host macros added at host creation. Junos lists many internal and logical interfaces (ge-0/0/0.0,
-# irb, pfe-, vcp-, bme0 ...): discover physical ports, ae bundles and the me0 management port only.
+# irb, pfe-, vcp- ...): discover physical ports, ae bundles and the me0 / bme0 management ports only.
 VENDOR_MACROS = {
-    "juniper": [{"macro": "{$NET.IF.IFNAME.MATCHES}", "value": r"^((ge|xe|et|mge)-[0-9]+/[0-9]+/[0-9]+|ae[0-9]+|me0)$",
-                 "description": "Physical ports, ae bundles and me0 only (no logical units or internal interfaces)"}],
+    "juniper": [{"macro": "{$NET.IF.IFNAME.MATCHES}", "value": r"^((ge|xe|et|mge)-[0-9]+/[0-9]+/[0-9]+|ae[0-9]+|me0|bme0)$",
+                 "description": "Physical ports, ae bundles, me0 + bme0 management only (no logical units)"}],
 }
 ICMP_ONLY = "ICMP Ping"
 SWITCHES = [  # host, visible name, IP, template, role, vendor, enabled
@@ -55,7 +55,7 @@ HOST_MACROS = {
 IFNAME_NOT_MATCHES = (r"(^Software Loopback Interface|^NULL[0-9.]*$|^[Ll]o[0-9.]*$|^[Ss]ystem$|^Nu[0-9.]*$|"
                       r"^veth[0-9a-z]+$|docker[0-9]+|br-[a-z0-9]{12}|^Loopback[0-9]+$|^InLoopBack[0-9]+$|^Vi[0-9]+$|"
                       r"^Vlan[0-9]+$|^Vl[0-9]+$|^VLAN-|^StackPort|^StackSub|^Vlan-interface[0-9]+$|"
-                      r"^Vlanif[0-9]+$|^Console|^LoopBack[0-9]+$|^MEth)")   # last line: Huawei
+                      r"^Vlanif[0-9]+$|^Console|^LoopBack[0-9]+$)")   # last line: Huawei (MEth mgmt port discovered since 2026-10-15)
 PROTO_DELAYS = {"net.if.in[": "10s", "net.if.out[": "10s", "net.if.status[": "30s", "net.if.in.errors[": "1m",
                 "net.if.out.errors[": "1m", "net.if.in.discards[": "1m", "net.if.out.discards[": "1m",
                 "net.if.speed[": "5m", "net.if.type[": "1h"}

@@ -2,6 +2,8 @@
 # Apache/PHP/Chrome (reports) ~3 GB, rest page cache. The DB is expected to grow to ~150 GB (history 180d, trends 2y).
 [mysqld]
 innodb_buffer_pool_size        = 8G
+# 2026-10-15: save/reload the whole buffer pool across restarts (default 25%), so it is warm after a reboot/upgrade
+innodb_buffer_pool_dump_pct     = 100
 innodb_log_file_size           = 1G
 innodb_log_buffer_size         = 64M
 innodb_flush_method            = O_DIRECT

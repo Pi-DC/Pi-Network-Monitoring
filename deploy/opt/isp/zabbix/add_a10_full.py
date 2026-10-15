@@ -411,6 +411,26 @@ def main():
         item(f"a10.mgmt.{key}", name=f"A10 management port: {label}", type=SNMP, snmp_oid=oid,
              delay="1m", value_type=FLOAT, units="bps", trends=TRENDS, tags=mtags,
              preprocessing=base.pp((CPS, ""), (MULT, "8")))
+    # status details + error counters (fleet audit 2026-10-15: every port incl. management)
+    item("a10.mgmt.admin", name="A10 management port: Admin status", type=SNMP, snmp_oid="1.3.6.1.2.1.2.2.1.7.0",
+         delay="1m", value_type=UINT, trends="0", tags=mtags, valuemapid=vm["IF-MIB::ifOperStatus"],
+         preprocessing=base.pp((DISCARD_HB, "1h")))
+    item("a10.mgmt.speed", name="A10 management port: Speed", type=SNMP, snmp_oid="1.3.6.1.2.1.31.1.1.1.15.0",
+         delay="5m", value_type=UINT, units="bps", trends="0", tags=mtags,
+         preprocessing=base.pp((MULT, "1000000"), (DISCARD_HB, "1h")))
+    for oid, key, label in (("1.3.6.1.2.1.2.2.1.14.0", "errors.in", "Inbound errors"),
+                            ("1.3.6.1.2.1.2.2.1.20.0", "errors.out", "Outbound errors"),
+                            ("1.3.6.1.2.1.2.2.1.13.0", "drops.in", "Inbound discards"),
+                            ("1.3.6.1.2.1.2.2.1.19.0", "drops.out", "Outbound discards")):
+        item(f"a10.mgmt.{key}", name=f"A10 management port: {label}", type=SNMP, snmp_oid=oid, delay="1m",
+             value_type=FLOAT, units="/s", trends=TRENDS, tags=mtags, preprocessing=base.pp((CPS, "")))
+    trigger("A10 management port: link went DOWN", priority=3,
+            expression=f"last(/{H}/a10.mgmt.status)=2 and last(/{H}/a10.mgmt.admin)=1",
+            recovery_mode=1, recovery_expression=f"last(/{H}/a10.mgmt.status)=1", tags=mtags,
+            comments="Management port admin-up but link down (SNMP is polled over this port, so the host "
+                     "usually also becomes unavailable).")
+    trigger(f"A10 management port: inbound errors over {{$A10.IF.ERRORS.WARN}}/s for 5m", priority=2,
+            expression=f"min(/{H}/a10.mgmt.errors.in,5m)>{{$A10.IF.ERRORS.WARN}}", tags=mtags)
 
     def slow_rate(rid, w, nm, tg, key, label, oid, mult, units):
         """Rate of a counter the A10 refreshes only every ~60 s (trunk and legacy SLB stat tables): a raw item keeps

@@ -1,0 +1,12 @@
+# Zabbix database tuning for the 24 GB VM (2026-10-09). Budget: MariaDB ~9 GB, Zabbix server caches ~3 GB,
+# Apache/PHP/Chrome (reports) ~3 GB, rest page cache. The DB is expected to grow to ~150 GB (history 180d, trends 2y).
+[mysqld]
+innodb_buffer_pool_size        = 8G
+innodb_log_file_size           = 1G
+innodb_log_buffer_size         = 64M
+innodb_flush_method            = O_DIRECT
+innodb_flush_log_at_trx_commit = 2      # flush redo once a second (Zabbix-recommended; may lose <=1s on a power cut)
+innodb_io_capacity             = 1000
+tmp_table_size                 = 64M
+max_heap_table_size            = 64M
+max_connections                = 300

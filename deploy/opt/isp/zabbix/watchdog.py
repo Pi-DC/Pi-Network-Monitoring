@@ -24,13 +24,17 @@ from email.message import EmailMessage
 import setup_isp_links as base
 import setup_email_alerts as mail
 
-SERVICES = ["mariadb", "zabbix-server", "apache2", "zabbix-web-service", "zabbix-agent2"]   # start order
+SERVICES = ["mariadb", "zabbix-server", "apache2", "zabbix-web-service", "zabbix-agent2",
+            "smokeping", "snmpd", "postfix@-"]   # start order
 STATE = "/var/lib/pi-netmon-watchdog/state.json"
 DISABLE_FLAG = "/etc/pi-netmon-watchdog.disable"
 STALL_SECONDS = 600
 DISK_MAX_PCT = 90
 REMIND_SECONDS = 6 * 3600
+APT_GRACE = 900     # an upgrade still "running" after this long is treated as stuck (2026-10-15: needrestart deadlock)
 WEB_URL = "http://127.0.0.1/zabbix/index.php"
+CRON_STATUS = "/var/lib/pi-netmon/cron"     # cron_run.py: <job>.json = {"rc", "duration", "end"}
+CRON_DIR = "/etc/cron.d"
 
 
 def log(msg):
@@ -52,6 +56,16 @@ def apt_running():
 
 
 def restart(svc, how="restart"):
+    if how == "start":
+        # a start job queued behind a hung restart (2026-10-15 06:39-09:30) never runs: cancel it, start on its own
+        for line in sh("systemctl", "list-jobs", "--no-legend").stdout.splitlines():
+            f = line.split()
+            if len(f) >= 4 and f[1] == f"{svc}.service" and f[3] == "waiting":
+                sh("systemctl", "cancel", f[0])
+                log(f"cancelled queued job {f[0]} ({svc} {f[2]} waiting)")
+        r = sh("systemctl", "start", "--job-mode=ignore-dependencies", svc, timeout=600)
+        log(f"{how} {svc}: {'OK' if r.returncode == 0 else 'FAILED ' + r.stderr.strip()}")
+        return r.returncode == 0
     r = sh("systemctl", how, svc, timeout=600)
     log(f"{how} {svc}: {'OK' if r.returncode == 0 else 'FAILED ' + r.stderr.strip()}")
     return r.returncode == 0
@@ -90,6 +104,49 @@ def send(subject, body):
         log(f"e-mail failed ({subject}): {e}")
 
 
+def boot_time():
+    return time.time() - float(open("/proc/uptime").read().split()[0])
+
+
+def cron_jobs():
+    """job name -> shell command, from the cron_run.py lines in /etc/cron.d."""
+    jobs = {}
+    for f in os.listdir(CRON_DIR):
+        try:
+            lines = open(os.path.join(CRON_DIR, f)).read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            parts = line.split(None, 6)
+            if len(parts) == 7 and not line.startswith("#") and "cron_run.py " in parts[6]:
+                name = parts[6].split("cron_run.py ", 1)[1].split()[0]
+                jobs[name] = parts[6]
+    return jobs
+
+
+def rerun_failed_jobs(st, since):
+    """Cron jobs that failed while the DB / Zabbix server was down (or at boot) are re-run once, in the background,
+    so their "Cron job ... failed" alerts clear without waiting for the next scheduled run."""
+    jobs, rerun = cron_jobs(), []
+    for name, cmd in jobs.items():
+        if name == "watchdog":
+            continue
+        try:
+            js = json.load(open(f"{CRON_STATUS}/{name}.json"))
+        except Exception:
+            continue
+        if js.get("rc") != 0 and js.get("end", 0) >= since and st["retried"].get(name) != js.get("end"):
+            st["retried"][name] = js.get("end")
+            subprocess.Popen(["/bin/sh", "-c", cmd], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            rerun.append(name)
+    if rerun:
+        log(f"re-ran cron jobs that failed during the outage: {', '.join(rerun)}")
+        send(f"re-ran {len(rerun)} failed cron job(s)", "These cron jobs failed while the database / Zabbix server was "
+             "down and were started again now that it is back:\n  " + "\n  ".join(rerun) +
+             "\nTheir 'Cron job ... failed' alerts clear by themselves when the re-run succeeds.")
+
+
 def main():
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     try:
@@ -98,7 +155,14 @@ def main():
         st = {}
     st.setdefault("strikes", {})
     st.setdefault("open", {})       # problem key -> {"since", "mailed", "text"}
-    may_fix = not os.path.exists(DISABLE_FLAG) and not apt_running()
+    st.setdefault("retried", {})    # cron job -> "end" of the failed run already re-run (one retry per failure)
+    now = time.time()
+    if apt_running():
+        st.setdefault("apt_since", now)
+    else:
+        st.pop("apt_since", None)
+    apt_stuck = now - st.get("apt_since", now) >= APT_GRACE
+    may_fix = not os.path.exists(DISABLE_FLAG) and ("apt_since" not in st or apt_stuck)
     problems = {}
 
     # 1. services that are not running at all
@@ -132,6 +196,19 @@ def main():
         else:
             st["strikes"]["stall"] = 0
 
+    # 2b. after an outage or a reboot: re-run cron jobs that failed while the DB / Zabbix server was unavailable
+    core_up = active("mariadb") and active("zabbix-server")
+    boot = boot_time()
+    if st.get("boot") is None or abs(st["boot"] - boot) > 60:
+        st["boot"] = boot
+        st["outage_since"] = min(st.get("outage_since", boot - 600), boot - 600)
+    if not core_up:
+        st.setdefault("outage_since", now)
+    elif "outage_since" in st and st["strikes"].get("stall", 0) == 0 and may_fix:
+        rerun_failed_jobs(st, st["outage_since"] - 120)
+        if now - boot > 900:   # keep the boot window open for 15 min: jobs starting during boot may still fail
+            st.pop("outage_since")
+
     # 3. web UI
     if active("apache2"):
         if web_ok():
@@ -158,13 +235,12 @@ def main():
     else:
         st["strikes"]["ntp"] = 0
 
-    now = time.time()
     for key, text in problems.items():
         o = st["open"].get(key)
         if o is None or now - o["mailed"] >= REMIND_SECONDS:
             log(f"PROBLEM {text}")
             send(f"PROBLEM: {text}", f"The watchdog detected: {text}." + ("" if may_fix else
-                 "\nNo automatic fix attempted (maintenance flag or package upgrade running)."))
+                 "\nNo automatic fix attempted yet (maintenance flag, or a package upgrade running for under 15 min)."))
             st["open"][key] = {"since": (o or {}).get("since", now), "mailed": now, "text": text}
     for key in [k for k in st["open"] if k not in problems]:
         o = st["open"].pop(key)
