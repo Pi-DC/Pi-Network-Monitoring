@@ -10,7 +10,11 @@ Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
   NFS     172.16.95.5:/Repo_BDR/Pi-Network-Monitoring, mounted on /mnt/pi-netmon-nfs (automount, /etc/fstab):
           one folder per night, all files gpg AES-256 encrypted (the export is readable by any host):
             zabbix-full.mbstream.zst.gpg whole MariaDB instance incl. graph history: physical copy (mariabackup)
+                                         - Sundays (FULL_WEEKDAY), or when there is no usable full on NFS
                                          (until 2026-10-15: zabbix-full.sql.zst.gpg, a mysqldump)
+            zabbix-incr.mbstream.zst.gpg the other nights: mariabackup incremental against the last FULL
+                                         (differential - a restore needs that full + this one file;
+                                         MANIFEST.json "base" names the full's folder)
             zabbix-config.sql.zst.gpg    configuration only (no history) - small, quick to restore
             secrets.tar.zst.gpg          credentials, TLS keys, original config files with passwords
             MANIFEST.json                time, sizes, SHA-256, matching git commit
@@ -23,14 +27,20 @@ The full backup is a mariabackup copy since 2026-10-16: mysqldump of the whole d
 4 h 43 min - it reads history_uint row by row in key order, one small random read at a time, and the VM disk takes
 ~12 ms per read. mariabackup copies the data files in large blocks with several threads.
 
-Every encrypted file is decrypted again and checked before it is copied anywhere (the full copy is unpacked and
-prepared, as a restore would do it). Any failure stops the run and
+Weekly full + nightly incremental since 2026-10-16: 6 months of history will be ~800 GB, a nightly full of that
+(~150 GB) x 14 nights would not fit the 1 TB NFS share. An incremental still reads the whole database (MariaDB
+10.11 has no changed-page tracking) but only writes the changed pages. A full that a kept incremental needs is
+never rotated out. --full forces a full backup.
+
+Every encrypted file is decrypted again and checked before it is copied anywhere (a full copy is unpacked and
+prepared, as a restore would do it; an incremental is unpacked and its LSN range checked against its full). Any failure stops the run and
 leaves the previous backups untouched; /var/lib/pi-netmon-backup/status/last-result ("OK ..." / "FAILED ...")
 is read by Zabbix, which e-mails on failure or when no backup succeeded for 26 hours.
 Passphrase: /root/.credentials/backup_passphrase (never in git; keep a copy outside the server).
 
 Restore: RESTORE.md / restore.sh in the repository. Check run (nothing pushed or copied): backup.py --no-push
 Manual run after a change: backup.py --message "<what changed>" (git commit title instead of "Configuration snapshot").
+Force a full database backup (instead of an incremental): backup.py --full
 """
 import datetime
 import glob
@@ -60,7 +70,10 @@ NO_DATA_TABLES = ["history", "history_uint", "history_str", "history_text", "his
                   "trends", "trends_uint", "auditlog"]   # schema only in the configuration dump
 DUMP = ["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers", "--hex-blob",
         "--no-tablespaces", "--default-character-set=utf8mb4"]
-FULL = "zabbix-full.mbstream.zst.gpg"
+FULL, INCR = "zabbix-full.mbstream.zst.gpg", "zabbix-incr.mbstream.zst.gpg"
+FULL_WEEKDAY = 6                                       # Sunday (datetime.weekday)
+FULL_MAX_AGE_DAYS = 7                                  # an older full is not used as a base
+BASE_STATE = f"{WORK}/full-base.json"                  # last full on NFS: folder + to_lsn (no data, no secrets)
 MARIABACKUP = ["mariabackup", "--user=root", "--parallel=4"]   # root over the unix socket, like mysqldump
 
 # Deployment files (plain text in git after redaction). Globs; directories are copied recursively.
@@ -126,7 +139,12 @@ def encrypt_stream(producer, dst, level=10, stderr=None):
             raise RuntimeError(f"creating {os.path.basename(dst)} failed")
 
 
-def verify(enc, kind):
+def checkpoints(d):
+    f = f"{d}/xtrabackup_checkpoints"
+    return dict(l.split(" = ", 1) for l in open(f).read().splitlines() if " = " in l) if os.path.exists(f) else {}
+
+
+def verify(enc, kind, base_lsn=None):
     """Decrypt + decompress again: the stream must be intact; dumps must have completed; bundles must list."""
     gp = subprocess.Popen(GPG + ["--decrypt", enc], stdout=subprocess.PIPE)
     zs = subprocess.Popen(["zstd", "-q", "-d", "-c"], stdin=gp.stdout, stdout=subprocess.PIPE)
@@ -137,7 +155,7 @@ def verify(enc, kind):
             size += len(chunk)
             tail = (tail + chunk)[-400:]
         ok = b"Dump completed" in tail and size > 1_000_000
-    elif kind == "mbstream":   # unpacked next to the run's folder; removed with it
+    elif kind in ("mbstream", "incr"):   # unpacked next to the run's folder; removed with it
         target = tempfile.mkdtemp(prefix="verify-", dir=os.path.dirname(os.path.dirname(enc)))
         ok = run(["mbstream", "-x", "-C", target], stdin=zs.stdout, check=False).returncode == 0
     else:
@@ -150,10 +168,15 @@ def verify(enc, kind):
         with open(f"{target}.log", "w") as err:
             rc = run(["mariabackup", "--prepare", "--use-memory=1G", f"--target-dir={target}"], stderr=err,
                      check=False).returncode
-        points = open(f"{target}/xtrabackup_checkpoints").read() if os.path.exists(f"{target}/xtrabackup_checkpoints") else ""
-        if rc or "backup_type = log-applied" not in points or not os.path.exists(f"{target}/{DB}/history_uint.ibd"):
+        tables = glob.glob(f"{target}/{DB}/history_uint.ibd") + glob.glob(f"{target}/{DB}/history_uint#P#*.ibd")
+        if rc or checkpoints(target).get("backup_type") != "log-applied" or not tables:   # (partitioned: one file each)
             raise RuntimeError(f"verification of {os.path.basename(enc)} failed: mariabackup --prepare: "
                                + open(f"{target}.log").read()[-300:])
+        shutil.rmtree(target)
+    if kind == "incr":   # cannot be prepared without its full; the stream is complete and starts where the full ends
+        cp = checkpoints(target)
+        if cp.get("backup_type") != "incremental" or cp.get("from_lsn") != str(base_lsn):
+            raise RuntimeError(f"verification of {os.path.basename(enc)} failed: checkpoints {cp}, full ends at {base_lsn}")
         shutil.rmtree(target)
 
 
@@ -338,12 +361,36 @@ def publish(src_dir, root, keep_days, name):
     os.rename(part, f"{root}/{name}")
     open(f"{root}/LATEST.txt", "w").write(f"{name}\n")
     cutoff = time.time() - keep_days * 86400
+    folders = [d for d in sorted(glob.glob(f"{root}/20*")) if not d.endswith(".partial")]
+    keep = {name} | {os.path.basename(d) for d in folders if os.path.getmtime(d) >= cutoff}
+    for d in folders:   # the full an incremental is based on stays as long as that incremental
+        if os.path.basename(d) in keep:
+            try:
+                keep.add(json.load(open(f"{d}/MANIFEST.json")).get("base") or name)
+            except (OSError, ValueError):
+                pass
     for old in sorted(glob.glob(f"{root}/20*")):
-        base_name = os.path.basename(old)
-        if base_name == name:
-            continue
-        if old.endswith(".partial") or os.path.getmtime(old) < cutoff:
+        if old.endswith(".partial") or os.path.basename(old) not in keep:
             shutil.rmtree(old, ignore_errors=True)
+
+
+def full_base(force_full):
+    """The full to base tonight's incremental on, or None for a full backup tonight."""
+    try:
+        base = json.load(open(BASE_STATE))
+    except (OSError, ValueError):
+        return None
+    if force_full or datetime.date.today().weekday() == FULL_WEEKDAY or not base.get("to_lsn"):
+        return None
+    if time.time() - base["time"] > FULL_MAX_AGE_DAYS * 86400 + 6 * 3600:
+        return None
+    m = f"{NFS}/{base['folder']}/MANIFEST.json"   # the full must still be on NFS and be the one recorded
+    try:
+        if json.load(open(m)).get("to_lsn") != base["to_lsn"]:
+            return None
+    except (OSError, ValueError):
+        return None
+    return base
 
 
 def write_status(ok, text):
@@ -360,6 +407,7 @@ def main():
     started = time.time()
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
     dry = "--no-push" in sys.argv
+    force_full = "--full" in sys.argv
     message = sys.argv[sys.argv.index("--message") + 1] if "--message" in sys.argv else f"Configuration snapshot {stamp}"
     os.umask(0o077)
     tmp = tempfile.mkdtemp(prefix="pi-netmon-backup-", dir="/var/tmp")
@@ -391,15 +439,20 @@ def main():
             run(DUMP + ["--no-data", DB] + NO_DATA_TABLES, stdout=f)
         encrypt_stream(cfg_sql, f"{out}/zabbix-config.sql.zst.gpg", level=15)
         os.remove(cfg_sql)
+        base = full_base(force_full)
+        db_file, extra = (INCR, [f"--incremental-lsn={base['to_lsn']}"]) if base else (FULL, [])
         os.makedirs(f"{tmp}/mariabackup")   # its scratch folder; the copy itself goes to stdout
         with open(f"{tmp}/mariabackup.log", "w") as err:
             try:
-                encrypt_stream(MARIABACKUP + ["--backup", "--stream=mbstream", f"--target-dir={tmp}/mariabackup"],
-                               f"{out}/{FULL}", level=3, stderr=err)
+                encrypt_stream(MARIABACKUP + ["--backup", "--stream=mbstream", f"--target-dir={tmp}/mariabackup",
+                                              f"--extra-lsndir={tmp}/lsn"] + extra, f"{out}/{db_file}", level=3, stderr=err)
             except RuntimeError:
                 raise RuntimeError(f"mariabackup failed: {open(f'{tmp}/mariabackup.log').read()[-300:]}")
-        for f, kind in (("secrets.tar.zst.gpg", "secrets"), ("zabbix-config.sql.zst.gpg", "sql"), (FULL, "mbstream")):
-            verify(f"{out}/{f}", kind)
+        lsn = checkpoints(f"{tmp}/lsn")
+        log(f"{'incremental against ' + base['folder'] if base else 'full'} backup: LSN {lsn.get('from_lsn')} - {lsn.get('to_lsn')}")
+        for f, kind in (("secrets.tar.zst.gpg", "secrets"), ("zabbix-config.sql.zst.gpg", "sql"),
+                        (db_file, "incr" if base else "mbstream")):
+            verify(f"{out}/{f}", kind, base and base["to_lsn"])
         sizes = {f: os.path.getsize(f"{out}/{f}") for f in os.listdir(out)}
         log("encrypted + verified: " + ", ".join(f"{f} {s / 1e6:.1f} MB" for f, s in sorted(sizes.items())))
         if dry:
@@ -422,10 +475,14 @@ def main():
                                                          text=True).stdout.splitlines()[0],
             "encryption": "gpg --symmetric AES256 over zstd; passphrase /root/.credentials/backup_passphrase (not stored here)",
             "files": {f: {"bytes": os.path.getsize(f"{out}/{f}"), "sha256": sha256(f"{out}/{f}")} for f in sorted(sizes)},
+            "type": "incremental" if base else "full", "base": base["folder"] if base else None,
+            "from_lsn": lsn.get("from_lsn"), "to_lsn": lsn.get("to_lsn"),
         }
         open(f"{out}/MANIFEST.json", "w").write(json.dumps(manifest, indent=2) + "\n")
         nfs_ready()
         publish(out, NFS, KEEP_NFS_DAYS, stamp)
+        if not base:   # the base for the next nights' incrementals - only once the full is safely on NFS
+            json.dump({"folder": stamp, "to_lsn": lsn["to_lsn"], "time": int(time.time())}, open(BASE_STATE, "w"))
         total = sum(sizes.values()) / 1e9
         write_status(True, f"backup {stamp}: git {rev[:7]}, NFS {NFS_SOURCE}/{stamp} ({total:.2f} GB), "
                            f"{time.time() - started:.0f}s")

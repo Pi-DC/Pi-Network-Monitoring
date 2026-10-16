@@ -38,12 +38,17 @@ EOF
 systemctl daemon-reload; systemctl restart remote-fs.target
 if [ -z "$BACKUP" ]; then BACKUP="$NFS/$(cat "$NFS/LATEST.txt")"; fi
 echo "backup: $BACKUP"; cat "$BACKUP/MANIFEST.json"
-( cd "$BACKUP" && python3 -c "
+check() { ( cd "$1" && python3 -c "
 import json,hashlib,sys
 m=json.load(open('MANIFEST.json'))
 for f,meta in m['files'].items():
-    h=hashlib.sha256(open(f,'rb').read()).hexdigest()
-    sys.exit(f'checksum mismatch: {f}') if h!=meta['sha256'] else print('checksum ok:',f)" )
+    h=hashlib.sha256()
+    with open(f,'rb') as fh:
+        for b in iter(lambda: fh.read(1<<20), b''): h.update(b)
+    sys.exit(f'checksum mismatch: {f}') if h.hexdigest()!=meta['sha256'] else print('checksum ok:',f)" ); }
+check "$BACKUP"
+BASE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('base') or '')" "$BACKUP/MANIFEST.json")
+if [ -n "$BASE" ]; then echo "incremental - its full: $BASE"; check "$(dirname "$BACKUP")/$BASE"; fi
 dec "$BACKUP/secrets.tar.zst.gpg" > "$WORK/secrets.tar"            # fails here if the passphrase is wrong
 
 step "2/9 Time zone and package repositories (Zabbix 7.0, Google Chrome)"
@@ -84,11 +89,22 @@ SQL
 step "6/9 Zabbix database"
 if [ "$CONFIG_ONLY" = 1 ]; then
   echo "configuration database (no graph history)"; dec "$BACKUP/zabbix-config.sql.zst.gpg" | mysql zabbix
-elif [ -f "$BACKUP/zabbix-full.mbstream.zst.gpg" ]; then   # backups from 2026-10-16 on: physical copy (mariabackup)
+elif [ -f "$BACKUP/zabbix-full.mbstream.zst.gpg" ] || [ -f "$BACKUP/zabbix-incr.mbstream.zst.gpg" ]; then
+  # backups from 2026-10-16 on: physical copy (mariabackup); an incremental night = its weekly full + that night
   echo "full database incl. graph history (mariabackup copy of the whole MariaDB instance, users included)"
+  FULLDIR="$BACKUP"
+  if [ -f "$BACKUP/zabbix-incr.mbstream.zst.gpg" ]; then
+    FULLDIR="$(dirname "$BACKUP")/$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['base'])" "$BACKUP/MANIFEST.json")"
+    echo "incremental backup: restoring its full from $FULLDIR first"
+  fi
   mkdir "$WORK/db"
-  dec "$BACKUP/zabbix-full.mbstream.zst.gpg" | mbstream -x -C "$WORK/db"
+  dec "$FULLDIR/zabbix-full.mbstream.zst.gpg" | mbstream -x -C "$WORK/db"
   mariabackup --prepare --use-memory=2G --target-dir="$WORK/db"
+  if [ "$FULLDIR" != "$BACKUP" ]; then
+    mkdir "$WORK/inc"
+    dec "$BACKUP/zabbix-incr.mbstream.zst.gpg" | mbstream -x -C "$WORK/inc"
+    mariabackup --prepare --use-memory=2G --target-dir="$WORK/db" --incremental-dir="$WORK/inc"
+  fi
   systemctl stop mariadb
   OLD=/var/lib/mysql.before-restore-$(date +%Y%m%d%H%M); mv /var/lib/mysql "$OLD"; echo "previous data directory: $OLD"
   install -d -o mysql -g mysql -m 755 /var/lib/mysql

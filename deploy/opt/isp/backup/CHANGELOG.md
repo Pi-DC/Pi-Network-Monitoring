@@ -5,6 +5,27 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
 
 ## 2026-10-16
 
+### Storage for 6 months of data (user: keep 6 months for all devices)
+- Measured: housekeeping override 180 d history / 730 d trends for every item (unchanged); ~1,040 values/s,
+  ~47 B per value -> +4.2 GB/day; 6 months ~760 GB history + up to ~70 GB trends. The 490 GB disk would have been
+  full ~late Jan 2027, before the first data reaches 180 days.
+- Disk: VMware disk grown to 2 TiB; partition 3, LVM PV/LV and ext4 grown online (`growpart /dev/sda 3`,
+  `pvresize`, `lvextend -r -l +100%FREE`): `/` 490 GB -> 2.0 TB, no downtime.
+- Partitioning (prepared, NOT applied yet - needs the user's go-ahead): `zabbix/db_partitions.py` partitions
+  history* by day and trends* by month (+ p_before / pmax), converts live tables without downtime (copy in itemid
+  chunks under READ COMMITTED, atomic RENAME with a 10 s lock timeout, delta copy, per-item sample check; `<table>_old`
+  kept until dropped by hand) and, daily, adds partitions ahead and drops only partitions entirely older than the
+  retention read from Zabbix Housekeeping (never below 90 d). After conversion: `--housekeeper-off`, plus a daily
+  cron. Dry run OK (history 180 d, trends 730 d read from the API).
+- Backups: weekly full (Sunday) + nightly differential incremental (`mariabackup --incremental-lsn` against the last
+  full; `zabbix-incr.mbstream.zst.gpg`, MANIFEST `type`/`base`/`from_lsn`/`to_lsn`, base state
+  /var/lib/pi-netmon-backup/full-base.json written only after the full is on NFS). NFS rotation keeps every full
+  that a kept incremental needs. An incremental is verified by unpacking + LSN check against its full; a full by
+  prepare as before (also accepts partitioned history_uint files). `backup.py --full` forces a full. restore.sh /
+  RESTORE.md restore full + incremental; restore.sh checksums now read in 1 MB blocks (a full of ~150 GB would not
+  fit in RAM). Note: an incremental still reads the whole database (no changed-page tracking in MariaDB 10.11) -
+  it saves NFS space (14 nightly fulls of ~150 GB would not fit 1 TB), not read time.
+
 ### Backup: full database copy with mariabackup instead of mysqldump
 - Why: the nightly full dump had grown from 38 min (Oct 13) to 4 h 43 min (Oct 15) while the data grew ~50 %.
   sysstat during the dumps: CPU 85 % idle, NFS copy ~30 s, but the VM disk 92 % busy at only ~1 MB/s with

@@ -19,7 +19,8 @@ Backup folders (newest first): `ls -1r /mnt/pi-netmon-nfs/ | head` - each has `M
 
 | File in a backup folder | Contents |
 |---|---|
-| `zabbix-full.mbstream.zst.gpg` | Whole MariaDB instance incl. graph history and database users - physical copy (`mariabackup`), from 2026-10-16 on |
+| `zabbix-full.mbstream.zst.gpg` | Whole MariaDB instance incl. graph history and database users - physical copy (`mariabackup`), from 2026-10-16 on; **Sundays** (weekly full) |
+| `zabbix-incr.mbstream.zst.gpg` | The other nights: only what changed since that week's full. Needs the full named by `"base"` in `MANIFEST.json` (kept on NFS as long as this night is) |
 | `zabbix-full.sql.zst.gpg` | Same as a SQL dump - backups up to 2026-10-15 |
 | `zabbix-config.sql.zst.gpg` | Configuration only (hosts, templates, items, triggers, dashboards, users, alerts, reports) - small |
 | `secrets.tar.zst.gpg` | `/root/.credentials`, `/etc/letsencrypt` (TLS keys), original `zabbix_server.conf` / `zabbix.conf.php` |
@@ -45,13 +46,18 @@ bundle, e.g. `dec /mnt/pi-netmon-nfs/<date>/secrets.tar.zst.gpg | tar -xpf - -C 
 
 ## B. Restore the database on the same server
 
-With graph history, backup from 2026-10-16 on (`zabbix-full.mbstream.zst.gpg`; needs ~2x the database size free
+With graph history, backup from 2026-10-16 on (`zabbix-full` or `zabbix-incr.mbstream.zst.gpg`; needs ~2x the database size free
 in /var/tmp; the copy replaces the whole MariaDB data directory, users included):
 ```bash
 B=/mnt/pi-netmon-nfs/$(cat /mnt/pi-netmon-nfs/LATEST.txt)     # or another night's folder
 W=/var/tmp/db-restore; rm -rf $W; mkdir $W
-dec $B/zabbix-full.mbstream.zst.gpg | mbstream -x -C $W         # unpack (Zabbix keeps running meanwhile)
+F=$B; grep -q '"base": "20' $B/MANIFEST.json && F=/mnt/pi-netmon-nfs/$(python3 -c "import json; print(json.load(open('$B/MANIFEST.json'))['base'])")
+dec $F/zabbix-full.mbstream.zst.gpg | mbstream -x -C $W         # unpack the (weekly) full; Zabbix keeps running
 mariabackup --prepare --use-memory=2G --target-dir=$W           # must end with "completed OK!"
+if [ "$F" != "$B" ]; then                                       # an incremental night: apply it on top
+  mkdir $W.inc && dec $B/zabbix-incr.mbstream.zst.gpg | mbstream -x -C $W.inc
+  mariabackup --prepare --use-memory=2G --target-dir=$W --incremental-dir=$W.inc && rm -rf $W.inc
+fi
 systemctl stop zabbix-server
 systemctl stop mariadb
 mv /var/lib/mysql /var/lib/mysql.before-restore && install -d -o mysql -g mysql -m 755 /var/lib/mysql
@@ -121,13 +127,14 @@ dl.google.com and the NFS server 172.16.95.5, and the backup passphrase.
   ```bash
   B=/mnt/pi-netmon-nfs/$(cat /mnt/pi-netmon-nfs/LATEST.txt); dec $B/zabbix-config.sql.zst.gpg | tail -1   # "-- Dump completed ..."
   ```
-- Test the full copy (needs ~2x the database size free in /var/tmp; ~10 min; the live database is not touched):
+- Test a full copy (a Sunday folder; needs ~2x the database size free in /var/tmp; the live database is not touched):
   ```bash
-  W=/var/tmp/db-test; rm -rf $W; mkdir $W
+  W=/var/tmp/db-test; rm -rf $W; mkdir $W; B=/mnt/pi-netmon-nfs/<Sunday folder>
   dec $B/zabbix-full.mbstream.zst.gpg | mbstream -x -C $W && mariabackup --prepare --use-memory=1G --target-dir=$W
   grep backup_type $W/xtrabackup_checkpoints; rm -rf $W                      # "backup_type = log-applied"
   ```
-  The nightly backup runs this same check before it copies anything to NFS.
+  The backup runs this same check on every full before it copies anything to NFS; an incremental is unpacked and
+  its LSN range checked against its full.
 
 ## Changing the passphrase
 

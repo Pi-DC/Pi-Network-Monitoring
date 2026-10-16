@@ -50,8 +50,9 @@ not kept in this repository or in the backups; after a full restore it has to be
 
 1. **Git** (this repository, branch `main`): copies every script and config file with secrets redacted, regenerates
    `docs/INVENTORY.md`, and refuses to push if any secret value is found in plain text. Commits only when something changed.
-2. **Encrypted data files** (gpg AES-256): full Zabbix database incl. graph history (physical copy with
-   `mariabackup` since 2026-10-16 - ~15-25 min; the old mysqldump took up to 5 h), configuration-only database
+2. **Encrypted data files** (gpg AES-256): Zabbix database incl. graph history - physical copy with `mariabackup`
+   since 2026-10-16 (the old mysqldump took up to 5 h): a **full copy on Sundays**, the other nights an
+   **incremental** with only what changed since that full (`backup.py --full` forces a full), configuration-only database
    (SQL dump), secrets bundle. Each file is decrypted and checked again before it is copied anywhere; the full copy
    is unpacked and prepared, as a restore would do it.
 3. **NFS** `172.16.95.5:/Repo_BDR/Pi-Network-Monitoring` (mounted on `/mnt/pi-netmon-nfs`): one folder per night,
