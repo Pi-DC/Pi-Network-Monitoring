@@ -96,8 +96,10 @@ dl.google.com and the NFS server 172.16.95.5, and the backup passphrase.
 
    `restore.sh`: mounts the NFS share (fstab automount) and checks the backup's checksums → installs Zabbix 7.0,
    MariaDB, Apache + PHP, Chrome and tools → puts every script and config file back (real passwords from
-   the secrets bundle, owners and modes as recorded) → MariaDB tuning, `zabbix` database and user → imports the
-   database → Apache modules / sites → starts everything and prints the service states.
+   the secrets bundle, owners and modes as recorded) → MariaDB tuning, `zabbix` database and user → restores the
+   database (backups from 2026-10-16 on: unpacks and prepares the `mariabackup` copy and moves it into an empty
+   `/var/lib/mysql` - database users included; older backups: imports the SQL dump) → Apache modules / sites →
+   starts everything and prints the service states.
 3. **After the restore**
    - Same IP (172.20.119.99) is easiest. Otherwise point `isp.picloud.in` (internal DNS) at the new IP and allow
      SNMP from it on every device (A10, routers and switches have SNMP ACLs).
@@ -119,6 +121,13 @@ dl.google.com and the NFS server 172.16.95.5, and the backup passphrase.
   ```bash
   B=/mnt/pi-netmon-nfs/$(cat /mnt/pi-netmon-nfs/LATEST.txt); dec $B/zabbix-config.sql.zst.gpg | tail -1   # "-- Dump completed ..."
   ```
+- Test the full copy (needs ~2x the database size free in /var/tmp; ~10 min; the live database is not touched):
+  ```bash
+  W=/var/tmp/db-test; rm -rf $W; mkdir $W
+  dec $B/zabbix-full.mbstream.zst.gpg | mbstream -x -C $W && mariabackup --prepare --use-memory=1G --target-dir=$W
+  grep backup_type $W/xtrabackup_checkpoints; rm -rf $W                      # "backup_type = log-applied"
+  ```
+  The nightly backup runs this same check before it copies anything to NFS.
 
 ## Changing the passphrase
 

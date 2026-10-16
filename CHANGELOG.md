@@ -16,7 +16,8 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
   every night by unpacking it and running `mariabackup --prepare` (must end log-applied with history_uint present).
   The small `zabbix-config.sql.zst.gpg` (mysqldump without history) is unchanged.
 - Test run (`backup.py --no-push`, 10:36-10:50): copy 9.5 min at ~45 MB/s, unpack + prepare 4.5 min, 14 min in
-  total (was 3.5-4.7 h). Full file 4.94 GB (SQL dump was 3.94 GB): 14 nights ~70 GB of the 1 TB NFS share.
+  total (was 3.5-4.7 h). First real run 10:53-11:16 (23.5 min; the copy ran at half the test's speed while Zabbix
+  was writing): git 8944ae2, NFS 2026-10-16_1053. Full file 4.94 GB (SQL dump was 3.94 GB): 14 nights ~70 GB of the 1 TB NFS share.
 - `restore.sh` and RESTORE.md restore either format: the mariabackup copy (unpack, prepare, move-back into an
   empty /var/lib/mysql; the old data directory is kept as /var/lib/mysql.before-restore*) or, for backups up to
   2026-10-15, the SQL dump. Backups of the old files: `backup.py/restore.sh/RESTORE.md.20261016`.
