@@ -76,7 +76,10 @@ dec $B/zabbix-full.sql.zst.gpg | mysql zabbix                   # with graph his
 #   or: dec $B/zabbix-config.sql.zst.gpg | mysql zabbix          # configuration only, much faster
 systemctl start zabbix-server
 ```
-Then check https://isp.picloud.in/zabbix.
+Then check https://isp.picloud.in/zabbix. A SQL dump (backups up to 2026-10-15) restores the history / trends tables
+unpartitioned: convert them again with `cd /opt/isp/zabbix && python3 db_partitions.py --convert history history_uint
+history_str history_text history_log history_bin trends trends_uint` (no downtime; the copies from mariabackup are
+already partitioned).
 
 ---
 

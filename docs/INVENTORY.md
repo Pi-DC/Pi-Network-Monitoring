@@ -88,6 +88,7 @@ Default thresholds: CPU 75 %, memory 85 % (`set_default_thresholds.py`); per-dev
 - `pi-netmon-watchdog`: `*/2 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py watchdog -- /usr/bin/timeout 900 /usr/bin/python3 watchdog.py >> /var/log/zabbix/watchdog.log 2>&1`
 - `zabbix-click-to-graph`: `*/10 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py click_to_graph -- /usr/bin/python3 click_to_graph.py >> /var/log/zabbix/click-to-graph.log 2>&1`
 - `zabbix-daily-reports`: `15 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py sync_daily_reports -- /usr/bin/python3 sync_daily_reports.py >> /var/log/zabbix/daily-reports-sync.log 2>&1`
+- `zabbix-db-partitions`: `10 5 * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py db_partitions -- /usr/bin/python3 db_partitions.py >> /var/log/zabbix/db-partitions.log 2>&1`
 - `zabbix-default-thresholds`: `40 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py set_default_thresholds -- /usr/bin/python3 set_default_thresholds.py >> /var/log/zabbix/default-thresholds.log 2>&1`
 - `zabbix-device-uptime`: `* * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py device_uptime -- /usr/bin/python3 device_uptime.py >> /var/log/zabbix/device-uptime.log 2>&1`
 - `zabbix-device-uptime`: `55 * * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py device_uptime_setup -- /usr/bin/python3 device_uptime.py --setup >> /var/log/zabbix/device-uptime.log 2>&1`

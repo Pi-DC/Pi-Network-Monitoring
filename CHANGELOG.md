@@ -11,12 +11,17 @@ history of `deploy/` (nightly "Configuration snapshot" commits).
   full ~late Jan 2027, before the first data reaches 180 days.
 - Disk: VMware disk grown to 2 TiB; partition 3, LVM PV/LV and ext4 grown online (`growpart /dev/sda 3`,
   `pvresize`, `lvextend -r -l +100%FREE`): `/` 490 GB -> 2.0 TB, no downtime.
-- Partitioning (prepared, NOT applied yet - needs the user's go-ahead): `zabbix/db_partitions.py` partitions
+- Partitioning (applied 2026-10-16 15:01-16:59, conversion run by the user): `zabbix/db_partitions.py` partitions
   history* by day and trends* by month (+ p_before / pmax), converts live tables without downtime (copy in itemid
   chunks under READ COMMITTED, atomic RENAME with a 10 s lock timeout, delta copy, per-item sample check; `<table>_old`
   kept until dropped by hand) and, daily, adds partitions ahead and drops only partitions entirely older than the
-  retention read from Zabbix Housekeeping (never below 90 d). After conversion: `--housekeeper-off`, plus a daily
-  cron. Dry run OK (history 180 d, trends 730 d read from the API).
+  retention read from Zabbix Housekeeping (never below 90 d). Result: history* 32 daily partitions each, trends* 6
+  monthly; history_uint 471,019,394 rows copied + 1,380,467 written meanwhile, history 57,119,477 + 20,052; every
+  table's 200-item sample check OK; Zabbix kept writing throughout (~1,010 values/s, write cache 0 %). During the
+  history_uint delta copy (16:13-16:59) graphs lacked 14:13-16:13 for items not yet processed - filled in since.
+  Then Zabbix housekeeping of history/trends OFF (`--housekeeper-off`; override 180d / 730d kept - that is the
+  retention the script applies) and cron `/etc/cron.d/zabbix-db-partitions` 05:10 daily via cron_run.py.
+  The originals are kept as `<table>_old` (~27 GB; also in the backups) until dropped with `--drop-old <table>`.
 - Backups: weekly full (Sunday) + nightly differential incremental (`mariabackup --incremental-lsn` against the last
   full; `zabbix-incr.mbstream.zst.gpg`, MANIFEST `type`/`base`/`from_lsn`/`to_lsn`, base state
   /var/lib/pi-netmon-backup/full-base.json written only after the full is on NFS). NFS rotation keeps every full

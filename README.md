@@ -41,7 +41,7 @@ not kept in this repository or in the backups; after a full restore it has to be
 | `/opt/isp/ssl/` | Let's Encrypt (DNS-01 via acme-dns) scripts |
 | `/opt/isp/backup/` | `backup.py`, `restore.sh`, these documents |
 | `/etc/zabbix/`, `/etc/apache2/`, `/etc/mysql/mariadb.conf.d/60-zabbix-tuning.cnf` | Service configuration |
-| `/etc/cron.d/` | `zabbix-click-to-graph` (10 min), `zabbix-daily-reports` (hourly), `zabbix-default-thresholds` (hourly), `pi-netmon-backup` (21:00) |
+| `/etc/cron.d/` | `zabbix-click-to-graph` (10 min), `zabbix-daily-reports` (hourly), `zabbix-default-thresholds` (hourly), `zabbix-db-partitions` (05:10, history/trends partitions - `db_partitions.py`), `pi-netmon-backup` (21:00) |
 | `/root/.credentials/` | Passwords, SNMP communities, backup passphrase (root only; backed up only inside the encrypted bundle) |
 
 ## Nightly backup - 21:00 IST

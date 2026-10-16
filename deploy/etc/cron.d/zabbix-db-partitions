@@ -1,0 +1,3 @@
+# Zabbix history/trends partitions (2026-10-16): add partitions ahead, drop the ones older than the Zabbix
+# housekeeping retention (180d history / 730d trends). /opt/isp/zabbix/db_partitions.py - Zabbix watches the job.
+10 5 * * * root cd /opt/isp/zabbix && /usr/bin/python3 cron_run.py db_partitions -- /usr/bin/python3 db_partitions.py >> /var/log/zabbix/db-partitions.log 2>&1
