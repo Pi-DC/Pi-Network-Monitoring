@@ -9,7 +9,8 @@ Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
           generated docs/INVENTORY.md (devices, dashboards, alerting, scheduled jobs). Commit only when changed.
   NFS     172.16.95.5:/Repo_BDR/Pi-Network-Monitoring, mounted on /mnt/pi-netmon-nfs (automount, /etc/fstab):
           one folder per night, all files gpg AES-256 encrypted (the export is readable by any host):
-            zabbix-full.sql.zst.gpg      whole Zabbix database incl. graph history
+            zabbix-full.mbstream.zst.gpg whole MariaDB instance incl. graph history: physical copy (mariabackup)
+                                         (until 2026-10-15: zabbix-full.sql.zst.gpg, a mysqldump)
             zabbix-config.sql.zst.gpg    configuration only (no history) - small, quick to restore
             secrets.tar.zst.gpg          credentials, TLS keys, original config files with passwords
             MANIFEST.json                time, sizes, SHA-256, matching git commit
@@ -18,7 +19,12 @@ Runs from /etc/cron.d/pi-netmon-backup at 21:00 IST.
   No copy is kept on the local disk (user request 2026-10-09): the run's working folder in /var/tmp is deleted at
   the end of every run, also when it fails.
 
-Every encrypted file is decrypted again and checked before it is copied anywhere. Any failure stops the run and
+The full backup is a mariabackup copy since 2026-10-16: mysqldump of the whole database had grown from 38 min to
+4 h 43 min - it reads history_uint row by row in key order, one small random read at a time, and the VM disk takes
+~12 ms per read. mariabackup copies the data files in large blocks with several threads.
+
+Every encrypted file is decrypted again and checked before it is copied anywhere (the full copy is unpacked and
+prepared, as a restore would do it). Any failure stops the run and
 leaves the previous backups untouched; /var/lib/pi-netmon-backup/status/last-result ("OK ..." / "FAILED ...")
 is read by Zabbix, which e-mails on failure or when no backup succeeded for 26 hours.
 Passphrase: /root/.credentials/backup_passphrase (never in git; keep a copy outside the server).
@@ -54,6 +60,8 @@ NO_DATA_TABLES = ["history", "history_uint", "history_str", "history_text", "his
                   "trends", "trends_uint", "auditlog"]   # schema only in the configuration dump
 DUMP = ["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers", "--hex-blob",
         "--no-tablespaces", "--default-character-set=utf8mb4"]
+FULL = "zabbix-full.mbstream.zst.gpg"
+MARIABACKUP = ["mariabackup", "--user=root", "--parallel=4"]   # root over the unix socket, like mysqldump
 
 # Deployment files (plain text in git after redaction). Globs; directories are copied recursively.
 FILES = [
@@ -103,10 +111,10 @@ def git(*args, capture=False):
 GPG = ["gpg", "--batch", "--yes", "--quiet", "--pinentry-mode", "loopback", "--passphrase-file", PASSPHRASE]
 
 
-def encrypt_stream(producer, dst, level=10):
+def encrypt_stream(producer, dst, level=10, stderr=None):
     """producer (argv list or file path) | zstd | gpg AES-256 -> dst."""
     with open(dst, "wb") as out:
-        src = subprocess.Popen(producer, stdout=subprocess.PIPE) if isinstance(producer, list) else None
+        src = subprocess.Popen(producer, stdout=subprocess.PIPE, stderr=stderr) if isinstance(producer, list) else None
         zs = subprocess.Popen(["zstd", "-q", f"-{level}", "-T0"] + ([] if src else ["-c", producer]),
                               stdin=src.stdout if src else None, stdout=subprocess.PIPE)
         if src:
@@ -129,12 +137,24 @@ def verify(enc, kind):
             size += len(chunk)
             tail = (tail + chunk)[-400:]
         ok = b"Dump completed" in tail and size > 1_000_000
+    elif kind == "mbstream":   # unpacked next to the run's folder; removed with it
+        target = tempfile.mkdtemp(prefix="verify-", dir=os.path.dirname(os.path.dirname(enc)))
+        ok = run(["mbstream", "-x", "-C", target], stdin=zs.stdout, check=False).returncode == 0
     else:
         names = run(["tar", "-tf", "-"], stdin=zs.stdout, capture_output=True, text=True).stdout.split("\n")
         ok = len(names) > 1 and (kind != "secrets" or any(n.endswith(".credentials/zabbix_db") for n in names))
     zs.stdout.close()
     if zs.wait() or gp.wait() or not ok:
         raise RuntimeError(f"verification of {os.path.basename(enc)} failed")
+    if kind == "mbstream":   # apply the redo log copied during the backup: the files must form a consistent database
+        with open(f"{target}.log", "w") as err:
+            rc = run(["mariabackup", "--prepare", "--use-memory=1G", f"--target-dir={target}"], stderr=err,
+                     check=False).returncode
+        points = open(f"{target}/xtrabackup_checkpoints").read() if os.path.exists(f"{target}/xtrabackup_checkpoints") else ""
+        if rc or "backup_type = log-applied" not in points or not os.path.exists(f"{target}/{DB}/history_uint.ibd"):
+            raise RuntimeError(f"verification of {os.path.basename(enc)} failed: mariabackup --prepare: "
+                               + open(f"{target}.log").read()[-300:])
+        shutil.rmtree(target)
 
 
 def sha256(p):
@@ -371,9 +391,14 @@ def main():
             run(DUMP + ["--no-data", DB] + NO_DATA_TABLES, stdout=f)
         encrypt_stream(cfg_sql, f"{out}/zabbix-config.sql.zst.gpg", level=15)
         os.remove(cfg_sql)
-        encrypt_stream(DUMP + [DB], f"{out}/zabbix-full.sql.zst.gpg", level=3)
-        for f, kind in (("secrets.tar.zst.gpg", "secrets"), ("zabbix-config.sql.zst.gpg", "sql"),
-                        ("zabbix-full.sql.zst.gpg", "sql")):
+        os.makedirs(f"{tmp}/mariabackup")   # its scratch folder; the copy itself goes to stdout
+        with open(f"{tmp}/mariabackup.log", "w") as err:
+            try:
+                encrypt_stream(MARIABACKUP + ["--backup", "--stream=mbstream", f"--target-dir={tmp}/mariabackup"],
+                               f"{out}/{FULL}", level=3, stderr=err)
+            except RuntimeError:
+                raise RuntimeError(f"mariabackup failed: {open(f'{tmp}/mariabackup.log').read()[-300:]}")
+        for f, kind in (("secrets.tar.zst.gpg", "secrets"), ("zabbix-config.sql.zst.gpg", "sql"), (FULL, "mbstream")):
             verify(f"{out}/{f}", kind)
         sizes = {f: os.path.getsize(f"{out}/{f}") for f in os.listdir(out)}
         log("encrypted + verified: " + ", ".join(f"{f} {s / 1e6:.1f} MB" for f, s in sorted(sizes.items())))

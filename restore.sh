@@ -84,7 +84,18 @@ SQL
 step "6/9 Zabbix database"
 if [ "$CONFIG_ONLY" = 1 ]; then
   echo "configuration database (no graph history)"; dec "$BACKUP/zabbix-config.sql.zst.gpg" | mysql zabbix
-else
+elif [ -f "$BACKUP/zabbix-full.mbstream.zst.gpg" ]; then   # backups from 2026-10-16 on: physical copy (mariabackup)
+  echo "full database incl. graph history (mariabackup copy of the whole MariaDB instance, users included)"
+  mkdir "$WORK/db"
+  dec "$BACKUP/zabbix-full.mbstream.zst.gpg" | mbstream -x -C "$WORK/db"
+  mariabackup --prepare --use-memory=2G --target-dir="$WORK/db"
+  systemctl stop mariadb
+  OLD=/var/lib/mysql.before-restore-$(date +%Y%m%d%H%M); mv /var/lib/mysql "$OLD"; echo "previous data directory: $OLD"
+  install -d -o mysql -g mysql -m 755 /var/lib/mysql
+  mariabackup --move-back --target-dir="$WORK/db"
+  chown -R mysql:mysql /var/lib/mysql
+  systemctl start mariadb
+else                                                       # older backups: SQL dump
   echo "full database incl. graph history (can take a while)"; dec "$BACKUP/zabbix-full.sql.zst.gpg" | mysql zabbix
 fi
 mysql -e "SET GLOBAL log_bin_trust_function_creators = 0;"

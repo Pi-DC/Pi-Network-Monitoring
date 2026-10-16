@@ -3,6 +3,24 @@
 Changes to the Pi Network Monitoring tool, newest first. Every configuration change is also visible in the git
 history of `deploy/` (nightly "Configuration snapshot" commits).
 
+## 2026-10-16
+
+### Backup: full database copy with mariabackup instead of mysqldump
+- Why: the nightly full dump had grown from 38 min (Oct 13) to 4 h 43 min (Oct 15) while the data grew ~50 %.
+  sysstat during the dumps: CPU 85 % idle, NFS copy ~30 s, but the VM disk 92 % busy at only ~1 MB/s with
+  12-14 ms per read (4.3 ms on Oct 13; slower since the reboot of 2026-10-14 00:27 - worth checking on the VMware
+  side: snapshots / datastore / IOPS limit). mysqldump reads history_uint (20 GB, 467 M rows) row by row in key
+  order, one small random read at a time, so it is bound by the per-read latency.
+- Now: `mariabackup --backup --stream=mbstream --parallel=4` | zstd -3 | gpg -> `zabbix-full.mbstream.zst.gpg`
+  (whole MariaDB instance incl. users; package `mariadb-backup` 10.11.14 installed, same as the server). Verified
+  every night by unpacking it and running `mariabackup --prepare` (must end log-applied with history_uint present).
+  The small `zabbix-config.sql.zst.gpg` (mysqldump without history) is unchanged.
+- Test run (`backup.py --no-push`, 10:36-10:50): copy 9.5 min at ~45 MB/s, unpack + prepare 4.5 min, 14 min in
+  total (was 3.5-4.7 h). Full file 4.94 GB (SQL dump was 3.94 GB): 14 nights ~70 GB of the 1 TB NFS share.
+- `restore.sh` and RESTORE.md restore either format: the mariabackup copy (unpack, prepare, move-back into an
+  empty /var/lib/mysql; the old data directory is kept as /var/lib/mysql.before-restore*) or, for backups up to
+  2026-10-15, the SQL dump. Backups of the old files: `backup.py/restore.sh/RESTORE.md.20261016`.
+
 ## 2026-10-15
 
 ### SNMP fleet audit (switches, firewalls, routers, A10)

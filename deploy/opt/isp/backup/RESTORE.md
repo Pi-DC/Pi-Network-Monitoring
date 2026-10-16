@@ -19,7 +19,8 @@ Backup folders (newest first): `ls -1r /mnt/pi-netmon-nfs/ | head` - each has `M
 
 | File in a backup folder | Contents |
 |---|---|
-| `zabbix-full.sql.zst.gpg` | Whole Zabbix database incl. graph history |
+| `zabbix-full.mbstream.zst.gpg` | Whole MariaDB instance incl. graph history and database users - physical copy (`mariabackup`), from 2026-10-16 on |
+| `zabbix-full.sql.zst.gpg` | Same as a SQL dump - backups up to 2026-10-15 |
 | `zabbix-config.sql.zst.gpg` | Configuration only (hosts, templates, items, triggers, dashboards, users, alerts, reports) - small |
 | `secrets.tar.zst.gpg` | `/root/.credentials`, `/etc/letsencrypt` (TLS keys), original `zabbix_server.conf` / `zabbix.conf.php` |
 
@@ -44,13 +45,30 @@ bundle, e.g. `dec /mnt/pi-netmon-nfs/<date>/secrets.tar.zst.gpg | tar -xpf - -C 
 
 ## B. Restore the database on the same server
 
+With graph history, backup from 2026-10-16 on (`zabbix-full.mbstream.zst.gpg`; needs ~2x the database size free
+in /var/tmp; the copy replaces the whole MariaDB data directory, users included):
 ```bash
 B=/mnt/pi-netmon-nfs/$(cat /mnt/pi-netmon-nfs/LATEST.txt)     # or another night's folder
+W=/var/tmp/db-restore; rm -rf $W; mkdir $W
+dec $B/zabbix-full.mbstream.zst.gpg | mbstream -x -C $W         # unpack (Zabbix keeps running meanwhile)
+mariabackup --prepare --use-memory=2G --target-dir=$W           # must end with "completed OK!"
+systemctl stop zabbix-server
+systemctl stop mariadb
+mv /var/lib/mysql /var/lib/mysql.before-restore && install -d -o mysql -g mysql -m 755 /var/lib/mysql
+mariabackup --move-back --target-dir=$W && chown -R mysql:mysql /var/lib/mysql
+systemctl start mariadb
+systemctl start zabbix-server                                   # MariaDB and Zabbix: restart separately, never together
+```
+When Zabbix works again: `rm -rf $W /var/lib/mysql.before-restore`.
+
+With graph history, backup up to 2026-10-15 (`zabbix-full.sql.zst.gpg`), or configuration only:
+```bash
+B=/mnt/pi-netmon-nfs/<date>
 systemctl stop zabbix-server
 mysql -e "DROP DATABASE zabbix; CREATE DATABASE zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
 dec $B/zabbix-full.sql.zst.gpg | mysql zabbix                   # with graph history
 #   or: dec $B/zabbix-config.sql.zst.gpg | mysql zabbix          # configuration only, much faster
-systemctl start zabbix-server                                   # MariaDB and Zabbix: restart separately, never together
+systemctl start zabbix-server
 ```
 Then check https://isp.picloud.in/zabbix.
 
